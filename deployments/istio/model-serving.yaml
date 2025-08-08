@@ -1,0 +1,111 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: model-serving-vs
+  namespace: clinical-trials
+spec:
+  hosts:
+  - model-service
+  http:
+  - match:
+    - headers:
+        x-model-version:
+          exact: "v1"
+    route:
+    - destination:
+        host: model-service
+        subset: v1
+  - route:
+    - destination:
+        host: model-service
+        subset: stable
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: model-serving-dr
+  namespace: clinical-trials
+spec:
+  host: model-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        maxRequestsPerConnection: 10
+    circuitBreaker:
+      consecutiveErrors: 3
+      interval: 30s
+      baseEjectionTime: 30s
+  subsets:
+  - name: stable
+    labels:
+      version: stable
+    trafficPolicy:
+      connectionPool:
+        tcp:
+          maxConnections: 50
+  - name: v1
+    labels:
+      version: v1
+    trafficPolicy:
+      connectionPool:
+        tcp:
+          maxConnections: 20
+---
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: model-serving-gateway
+  namespace: clinical-trials
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - clinical-trials-api.local
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: clinical-trials-tls
+    hosts:
+    - clinical-trials-api.local
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: model-serving-authz
+  namespace: clinical-trials
+spec:
+  selector:
+    matchLabels:
+      app: model-service
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/clinical-trials/sa/model-api"]
+  - to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/predict", "/health", "/metrics"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: model-serving-mtls
+  namespace: clinical-trials
+spec:
+  selector:
+    matchLabels:
+      app: model-service
+  mtls:
+    mode: STRICT

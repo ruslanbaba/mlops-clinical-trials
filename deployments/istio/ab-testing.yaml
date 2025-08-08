@@ -1,0 +1,114 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: ab-test-template
+  namespace: clinical-trials
+spec:
+  hosts:
+  - model-service
+  http:
+  - match:
+    - headers:
+        x-ab-test:
+          regex: "ab_test_.*"
+    route:
+    - destination:
+        host: model-service
+        subset: baseline
+      weight: 90
+    - destination:
+        host: model-service
+        subset: candidate
+      weight: 10
+    fault:
+      delay:
+        percentage:
+          value: 0.1
+        fixedDelay: 5s
+    timeout: 30s
+    retries:
+      attempts: 3
+      perTryTimeout: 10s
+  - route:
+    - destination:
+        host: model-service
+        subset: baseline
+      weight: 100
+---
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: external-model-registry
+  namespace: clinical-trials
+spec:
+  hosts:
+  - model-registry.external.com
+  ports:
+  - number: 443
+    name: https
+    protocol: HTTPS
+  location: MESH_EXTERNAL
+  resolution: DNS
+---
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: model-serving-metrics
+  namespace: clinical-trials
+spec:
+  metrics:
+  - providers:
+    - name: prometheus
+  - overrides:
+    - match:
+        metric: ALL_METRICS
+      tagOverrides:
+        model_version:
+          value: "%{REQUEST_HEADERS.x-model-version}"
+        ab_test_id:
+          value: "%{REQUEST_HEADERS.x-ab-test}"
+---
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: clinical-trials-istio
+  namespace: istio-system
+spec:
+  values:
+    pilot:
+      traceSampling: 1.0
+    global:
+      meshID: clinical-trials-mesh
+      meshConfig:
+        defaultConfig:
+          holdApplicationUntilProxyStarts: true
+          proxyStatsMatcher:
+            inclusionRegexps:
+            - ".*circuit_breakers.*"
+            - ".*outlier_detection.*"
+            - ".*_cx_.*"
+            exclusionRegexps:
+            - ".*osconfig.*"
+  components:
+    pilot:
+      k8s:
+        resources:
+          requests:
+            cpu: 200m
+            memory: 128Mi
+        hpaSpec:
+          minReplicas: 2
+          maxReplicas: 5
+    ingressGateways:
+    - name: istio-ingressgateway
+      enabled: true
+      k8s:
+        service:
+          type: LoadBalancer
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        hpaSpec:
+          minReplicas: 2
+          maxReplicas: 5
