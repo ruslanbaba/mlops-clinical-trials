@@ -1,0 +1,262 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: clinical_trials
+      POSTGRES_USER: clinical_user
+      POSTGRES_PASSWORD: clinical_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - clinical-trials-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinical_user -d clinical_trials"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass redis_password
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - clinical-trials-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # MinIO for object storage
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - clinical-trials-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MLflow tracking server
+  mlflow:
+    image: python:3.9-slim
+    command: >
+      bash -c "
+        pip install mlflow psycopg2-binary &&
+        mlflow server 
+        --backend-store-uri postgresql://clinical_user:clinical_password@postgres:5432/clinical_trials
+        --default-artifact-root s3://mlflow-artifacts/
+        --host 0.0.0.0
+        --port 5000
+      "
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin123
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - clinical-trials-network
+
+  # Prometheus monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - clinical-trials-network
+
+  # Grafana dashboards
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: grafana_password
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - clinical-trials-network
+
+  # Model training service
+  model-training:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.training
+      target: production
+    environment:
+      DATABASE_URL: postgresql://clinical_user:clinical_password@postgres:5432/clinical_trials
+      REDIS_URL: redis://:redis_password@redis:6379
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+    volumes:
+      - model_data:/app/models
+      - training_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+    networks:
+      - clinical-trials-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+
+  # Model serving service (baseline)
+  model-serving-baseline:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.serving
+      target: production
+    environment:
+      MODEL_VERSION: baseline
+      DATABASE_URL: postgresql://clinical_user:clinical_password@postgres:5432/clinical_trials
+      REDIS_URL: redis://:redis_password@redis:6379
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - model_data:/app/models:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - clinical-trials-network
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+
+  # Model serving service (candidate)
+  model-serving-candidate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.serving
+      target: production
+    environment:
+      MODEL_VERSION: candidate
+      DATABASE_URL: postgresql://clinical_user:clinical_password@postgres:5432/clinical_trials
+      REDIS_URL: redis://:redis_password@redis:6379
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - model_data:/app/models:ro
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - clinical-trials-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    environment:
+      DATABASE_URL: postgresql://clinical_user:clinical_password@postgres:5432/clinical_trials
+      REDIS_URL: redis://:redis_password@redis:6379
+      BASELINE_SERVICE_URL: http://model-serving-baseline:8080
+      CANDIDATE_SERVICE_URL: http://model-serving-candidate:8080
+    ports:
+      - "8000:8080"
+    depends_on:
+      - model-serving-baseline
+      - model-serving-candidate
+    networks:
+      - clinical-trials-network
+
+  # Jupyter Lab for development
+  jupyter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.training
+      target: development
+    environment:
+      DATABASE_URL: postgresql://clinical_user:clinical_password@postgres:5432/clinical_trials
+      REDIS_URL: redis://:redis_password@redis:6379
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./:/app
+      - jupyter_data:/home/app/.jupyter
+    ports:
+      - "8888:8888"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - clinical-trials-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:
+  model_data:
+  training_data:
+  jupyter_data:
+
+networks:
+  clinical-trials-network:
+    driver: bridge

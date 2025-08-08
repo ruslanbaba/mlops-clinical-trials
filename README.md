@@ -111,7 +111,3 @@ Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on contributing to 
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 📞 Contact
-
-For questions or support, please open an issue or contact the maintainers.
