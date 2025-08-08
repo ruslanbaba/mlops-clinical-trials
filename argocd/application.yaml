@@ -1,0 +1,180 @@
+# ArgoCD Application for MLOps Clinical Trials Platform
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mlops-clinical-trials
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: mlops-clinical-trials
+    environment: production
+spec:
+  project: default
+  
+  # Source configuration
+  source:
+    repoURL: https://github.com/ruslanbaba/mlops-clinical-trials.git
+    targetRevision: main
+    path: deployments/kubernetes
+    
+    # Helm configuration for parameterized deployments
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-production.yaml
+      parameters:
+        - name: image.tag
+          value: latest
+        - name: replicaCount
+          value: "3"
+        - name: environment
+          value: production
+  
+  # Destination configuration
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlops-clinical-trials
+  
+  # Sync policy
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  
+  # Health and sync status
+  revisionHistoryLimit: 10
+  
+  # Ignore differences for certain fields
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    - group: ""
+      kind: Secret
+      jsonPointers:
+        - /data
+  
+  # Operation
+  operation:
+    initiatedBy:
+      automated: true
+    info:
+      - name: "Reason"
+        value: "Automated sync by ArgoCD"
+
+---
+# ArgoCD Application for Development Environment
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mlops-clinical-trials-dev
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app: mlops-clinical-trials
+    environment: development
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/ruslanbaba/mlops-clinical-trials.git
+    targetRevision: develop
+    path: deployments/kubernetes
+    
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-development.yaml
+      parameters:
+        - name: image.tag
+          value: develop
+        - name: replicaCount
+          value: "1"
+        - name: environment
+          value: development
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlops-clinical-trials-dev
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m
+  
+  revisionHistoryLimit: 5
+
+---
+# ArgoCD Application for Staging Environment
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mlops-clinical-trials-staging
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app: mlops-clinical-trials
+    environment: staging
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/ruslanbaba/mlops-clinical-trials.git
+    targetRevision: staging
+    path: deployments/kubernetes
+    
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-staging.yaml
+      parameters:
+        - name: image.tag
+          value: staging
+        - name: replicaCount
+          value: "2"
+        - name: environment
+          value: staging
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mlops-clinical-trials-staging
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false  # Manual approval for staging
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 2m
+  
+  revisionHistoryLimit: 10

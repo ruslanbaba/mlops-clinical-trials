@@ -1,0 +1,497 @@
+# Enhanced Multi-Stage CI/CD Pipeline for MLOps Clinical Trials Platform
+
+name: Enhanced MLOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  PYTHON_VERSION_DEFAULT: "3.9"
+
+jobs:
+  # Stage 1: Code Quality and Linting
+  lint:
+    name: Code Quality & Linting
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+      
+      - name: Generate cache key
+        id: cache-key
+        run: echo "key=lint-${{ hashFiles('requirements*.txt') }}-${{ github.sha }}" >> $GITHUB_OUTPUT
+      
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ steps.cache-key.outputs.key }}
+          restore-keys: |
+            lint-${{ hashFiles('requirements*.txt') }}-
+            lint-
+      
+      - name: Install linting tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 black isort mypy bandit safety
+          pip install -r requirements.txt
+      
+      - name: Run Black formatting check
+        run: black --check --diff src/
+      
+      - name: Run isort import sorting check
+        run: isort --check-only --diff src/
+      
+      - name: Run flake8 linting
+        run: flake8 src/ --statistics
+      
+      - name: Run mypy type checking
+        run: mypy src/ --ignore-missing-imports
+      
+      - name: Run bandit security linting
+        run: bandit -r src/ -f json -o bandit-report.json
+      
+      - name: Run safety dependency check
+        run: safety check --json --output safety-report.json
+      
+      - name: Upload security reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            safety-report.json
+
+  # Stage 2: Multi-Version Testing Matrix
+  test:
+    name: Unit Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11"]
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+      
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: test-${{ matrix.python-version }}-${{ hashFiles('requirements*.txt') }}-${{ github.sha }}
+          restore-keys: |
+            test-${{ matrix.python-version }}-${{ hashFiles('requirements*.txt') }}-
+            test-${{ matrix.python-version }}-
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov pytest-xvfb
+          pip install -r requirements.txt
+      
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=html \
+            --junitxml=junit/test-results-${{ matrix.python-version }}.xml
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+          REDIS_URL: redis://localhost:6379/0
+      
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: |
+            junit/test-results-${{ matrix.python-version }}.xml
+            htmlcov/
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+  # Stage 3: Integration Tests
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+      
+      minio:
+        image: minio/minio
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 30s
+          --health-timeout 20s
+          --health-retries 3
+        ports:
+          - 9000:9000
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run integration tests
+        run: |
+          pytest tests/integration/ \
+            --junitxml=junit/integration-test-results.xml
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+          REDIS_URL: redis://localhost:6379/0
+          MINIO_ENDPOINT: localhost:9000
+          MINIO_ACCESS_KEY: minioadmin
+          MINIO_SECRET_KEY: minioadmin
+      
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: integration-test-results
+          path: junit/integration-test-results.xml
+
+  # Stage 4: Container Security Scanning
+  container-scan:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    needs: lint
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build Docker image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile.api
+          tags: ${{ env.IMAGE_NAME }}:scan
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy
+      
+      - name: Run Trivy vulnerability scanner
+        run: |
+          trivy image \
+            --format sarif \
+            --output trivy-results.sarif \
+            --severity HIGH,CRITICAL \
+            ${{ env.IMAGE_NAME }}:scan
+      
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+      
+      - name: Run Trivy for PR comments
+        if: github.event_name == 'pull_request'
+        run: |
+          trivy image \
+            --format table \
+            --severity HIGH,CRITICAL \
+            ${{ env.IMAGE_NAME }}:scan | tee trivy-results.txt
+      
+      - name: Comment PR with scan results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const trivyResults = fs.readFileSync('trivy-results.txt', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🔒 Container Security Scan Results\n\n\`\`\`\n${trivyResults}\n\`\`\``
+            });
+
+  # Stage 5: ML Model Validation
+  ml-validation:
+    name: ML Model Validation
+    runs-on: ubuntu-latest
+    needs: [test, integration-test]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+      
+      - name: Install ML dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install shap fairlearn xgboost
+      
+      - name: Run model validation tests
+        run: |
+          python -m pytest tests/ml/ \
+            --junitxml=junit/ml-validation-results.xml
+      
+      - name: Run bias detection
+        run: |
+          python scripts/bias_detection.py --data-path tests/fixtures/sample_data.csv
+      
+      - name: Run model explainability
+        run: |
+          python scripts/model_explainability.py --model-path models/sample_model.pkl
+      
+      - name: Upload ML validation results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: ml-validation-results
+          path: |
+            junit/ml-validation-results.xml
+            reports/bias_report.html
+            reports/explainability_report.html
+
+  # Stage 6: Build and Push Container Images
+  build:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: [test, integration-test, container-scan, ml-validation]
+    if: github.event_name != 'pull_request'
+    
+    strategy:
+      matrix:
+        component: [api, training, serving]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.component }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile.${{ matrix.component }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  # Stage 7: Deploy to Development
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    environment: development
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_DEV }}" | base64 -d > ~/.kube/config
+      
+      - name: Deploy to development namespace
+        run: |
+          kubectl apply -f deployments/kubernetes/ -n dev
+          kubectl set image deployment/api-deployment api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:develop-${{ github.sha }} -n dev
+          kubectl set image deployment/training-deployment training=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-training:develop-${{ github.sha }} -n dev
+          kubectl set image deployment/serving-deployment serving=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-serving:develop-${{ github.sha }} -n dev
+      
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/api-deployment -n dev --timeout=300s
+          kubectl rollout status deployment/training-deployment -n dev --timeout=300s
+          kubectl rollout status deployment/serving-deployment -n dev --timeout=300s
+      
+      - name: Run smoke tests
+        run: |
+          python tests/smoke_tests.py --environment dev
+
+  # Stage 8: Deploy to Production
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure kubectl for multi-cloud
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_AWS }}" | base64 -d > ~/.kube/config-aws
+          echo "${{ secrets.KUBECONFIG_AZURE }}" | base64 -d > ~/.kube/config-azure
+          echo "${{ secrets.KUBECONFIG_GCP }}" | base64 -d > ~/.kube/config-gcp
+      
+      - name: Deploy to AWS EKS
+        run: |
+          export KUBECONFIG=~/.kube/config-aws
+          kubectl apply -f deployments/kubernetes/ -n prod
+          kubectl set image deployment/api-deployment api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:main-${{ github.sha }} -n prod
+          kubectl rollout status deployment/api-deployment -n prod --timeout=300s
+      
+      - name: Deploy to Azure AKS
+        run: |
+          export KUBECONFIG=~/.kube/config-azure
+          kubectl apply -f deployments/kubernetes/ -n prod
+          kubectl set image deployment/api-deployment api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:main-${{ github.sha }} -n prod
+          kubectl rollout status deployment/api-deployment -n prod --timeout=300s
+      
+      - name: Deploy to GCP GKE
+        run: |
+          export KUBECONFIG=~/.kube/config-gcp
+          kubectl apply -f deployments/kubernetes/ -n prod
+          kubectl set image deployment/api-deployment api=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-api:main-${{ github.sha }} -n prod
+          kubectl rollout status deployment/api-deployment -n prod --timeout=300s
+      
+      - name: Run production health checks
+        run: |
+          python tests/health_checks.py --environment prod --all-clouds
+      
+      - name: Notify deployment success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: "✅ Production deployment successful across all clouds!"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      
+      - name: Notify deployment failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: "❌ Production deployment failed!"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
