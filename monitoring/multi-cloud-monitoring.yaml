@@ -1,0 +1,639 @@
+# Multi-Cloud Monitoring and Observability Stack
+# Advanced monitoring across AWS, Azure, and GCP with traffic surge handling
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: multi-cloud-monitoring
+  labels:
+    app: mlops-clinical-trials
+    component: monitoring
+
+---
+# Prometheus Multi-Cloud Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-multi-cloud-config
+  namespace: multi-cloud-monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: '${CLUSTER_NAME}'
+        environment: '${ENVIRONMENT}'
+        cloud_provider: '${CLOUD_PROVIDER}'
+        region: '${REGION}'
+    
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+    
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+    
+    remote_write:
+      # AWS CloudWatch
+      - url: "https://aps-workspaces.${AWS_REGION}.amazonaws.com/workspaces/${AWS_AMP_WORKSPACE_ID}/api/v1/remote_write"
+        sigv4:
+          region: ${AWS_REGION}
+          role_arn: ${AWS_AMP_ROLE_ARN}
+        queue_config:
+          max_samples_per_send: 1000
+          max_shards: 200
+          capacity: 2500
+      
+      # Azure Monitor
+      - url: "https://${AZURE_MONITOR_WORKSPACE}.monitor.azure.com/prometheus/api/v1/write"
+        headers:
+          Authorization: "Bearer ${AZURE_MONITOR_TOKEN}"
+        queue_config:
+          max_samples_per_send: 1000
+          max_shards: 200
+          capacity: 2500
+      
+      # Google Cloud Monitoring
+      - url: "https://monitoring.googleapis.com/v1/projects/${GCP_PROJECT_ID}/location/global/prometheus/api/v1/write"
+        headers:
+          Authorization: "Bearer ${GCP_MONITORING_TOKEN}"
+        queue_config:
+          max_samples_per_send: 1000
+          max_shards: 200
+          capacity: 2500
+    
+    scrape_configs:
+      # Multi-cloud Kubernetes clusters
+      - job_name: 'kubernetes-apiservers-aws'
+        kubernetes_sd_configs:
+        - role: endpoints
+          api_server: 'https://${AWS_EKS_ENDPOINT}'
+          authorization:
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: default;kubernetes;https
+        - target_label: cloud_provider
+          replacement: aws
+      
+      - job_name: 'kubernetes-apiservers-azure'
+        kubernetes_sd_configs:
+        - role: endpoints
+          api_server: 'https://${AZURE_AKS_ENDPOINT}'
+          authorization:
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: default;kubernetes;https
+        - target_label: cloud_provider
+          replacement: azure
+      
+      - job_name: 'kubernetes-apiservers-gcp'
+        kubernetes_sd_configs:
+        - role: endpoints
+          api_server: 'https://${GCP_GKE_ENDPOINT}'
+          authorization:
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: default;kubernetes;https
+        - target_label: cloud_provider
+          replacement: gcp
+      
+      # AWS-specific metrics
+      - job_name: 'aws-load-balancer'
+        ec2_sd_configs:
+        - region: ${AWS_REGION}
+          port: 9100
+          filters:
+          - name: tag:component
+            values: [load-balancer]
+        relabel_configs:
+        - source_labels: [__meta_ec2_tag_Name]
+          target_label: instance_name
+        - target_label: cloud_provider
+          replacement: aws
+      
+      - job_name: 'aws-rds-exporter'
+        static_configs:
+        - targets: ['rds-exporter:9042']
+        relabel_configs:
+        - target_label: cloud_provider
+          replacement: aws
+      
+      - job_name: 'aws-elasticache-exporter'
+        static_configs:
+        - targets: ['elasticache-exporter:9212']
+        relabel_configs:
+        - target_label: cloud_provider
+          replacement: aws
+      
+      # Azure-specific metrics
+      - job_name: 'azure-monitor-exporter'
+        static_configs:
+        - targets: ['azure-monitor-exporter:9276']
+        relabel_configs:
+        - target_label: cloud_provider
+          replacement: azure
+      
+      - job_name: 'azure-application-gateway'
+        static_configs:
+        - targets: ['azure-appgw-exporter:8080']
+        relabel_configs:
+        - target_label: cloud_provider
+          replacement: azure
+      
+      # GCP-specific metrics
+      - job_name: 'gcp-stackdriver-exporter'
+        static_configs:
+        - targets: ['stackdriver-exporter:9255']
+        relabel_configs:
+        - target_label: cloud_provider
+          replacement: gcp
+      
+      - job_name: 'gcp-cloud-sql-exporter'
+        static_configs:
+        - targets: ['cloud-sql-exporter:9308']
+        relabel_configs:
+        - target_label: cloud_provider
+          replacement: gcp
+      
+      # Model serving with auto-scaling metrics
+      - job_name: 'model-servers-multi-cloud'
+        kubernetes_sd_configs:
+        - role: service
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_service_label_app]
+          action: keep
+          regex: clinical-trials-.*
+        - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+        - action: labelmap
+          regex: __meta_kubernetes_service_label_(.+)
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: environment
+          regex: mlops-clinical-trials-(.+)
+          replacement: $1
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: environment
+          regex: mlops-clinical-trials
+          replacement: production
+      
+      # Traffic surge monitoring
+      - job_name: 'istio-proxy-surge'
+        kubernetes_sd_configs:
+        - role: pod
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_container_name]
+          action: keep
+          regex: istio-proxy
+        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:15090
+          target_label: __address__
+        - action: labelmap
+          regex: __meta_kubernetes_pod_label_(.+)
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: kubernetes_pod_name
+      
+      # KEDA autoscaler metrics
+      - job_name: 'keda-metrics'
+        static_configs:
+        - targets: ['keda-metrics-apiserver:8080']
+        scrape_interval: 30s
+      
+      # HPA metrics for surge handling
+      - job_name: 'hpa-metrics'
+        kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+            - kube-system
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_label_app]
+          action: keep
+          regex: metrics-server
+
+  # Multi-cloud alerting rules
+  multi-cloud-alerts.yml: |
+    groups:
+    - name: multi-cloud-infrastructure
+      rules:
+      - alert: CrossCloudLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket{source_cluster!=destination_cluster}[5m])) by (le, source_cluster, destination_cluster)) > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: network
+        annotations:
+          summary: "High cross-cloud latency detected"
+          description: "Cross-cloud latency between {{ $labels.source_cluster }} and {{ $labels.destination_cluster }} is {{ $value }}ms"
+      
+      - alert: CloudRegionDown
+        expr: up{job=~"kubernetes-apiservers-.*"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Cloud region unavailable"
+          description: "{{ $labels.cloud_provider }} region {{ $labels.region }} is down"
+      
+      - alert: MultiCloudFailover
+        expr: (count by (cloud_provider) (up{job=~"model-servers-.*"} == 1)) < 2
+        for: 5m
+        labels:
+          severity: critical
+          component: failover
+        annotations:
+          summary: "Multi-cloud failover triggered"
+          description: "Less than 2 clouds have active model servers. Current: {{ $value }}"
+    
+    - name: traffic-surge-alerts
+      rules:
+      - alert: TrafficSurgeDetected
+        expr: rate(istio_requests_total[1m]) > 1000
+        for: 2m
+        labels:
+          severity: warning
+          component: traffic
+        annotations:
+          summary: "Traffic surge detected"
+          description: "Request rate is {{ $value }} req/sec, triggering auto-scaling"
+      
+      - alert: AutoScalingTriggered
+        expr: kube_horizontalpodautoscaler_status_current_replicas > kube_horizontalpodautoscaler_spec_min_replicas * 2
+        for: 1m
+        labels:
+          severity: info
+          component: autoscaling
+        annotations:
+          summary: "Auto-scaling triggered"
+          description: "HPA {{ $labels.horizontalpodautoscaler }} scaled to {{ $value }} replicas"
+      
+      - alert: ScalingLimitReached
+        expr: kube_horizontalpodautoscaler_status_current_replicas >= kube_horizontalpodautoscaler_spec_max_replicas
+        for: 5m
+        labels:
+          severity: critical
+          component: capacity
+        annotations:
+          summary: "Scaling limit reached"
+          description: "HPA {{ $labels.horizontalpodautoscaler }} reached maximum {{ $value }} replicas"
+      
+      - alert: HighCPUUnderLoad
+        expr: (sum(rate(container_cpu_usage_seconds_total[5m])) by (pod) / sum(container_spec_cpu_quota/container_spec_cpu_period) by (pod)) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "High CPU usage under load"
+          description: "Pod {{ $labels.pod }} CPU usage is {{ $value | humanizePercentage }}"
+      
+      - alert: MemoryPressureUnderLoad
+        expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) > 0.85
+        for: 3m
+        labels:
+          severity: warning
+          component: performance
+        annotations:
+          summary: "Memory pressure under load"
+          description: "Container {{ $labels.container }} memory usage is {{ $value | humanizePercentage }}"
+    
+    - name: ml-pipeline-surge-alerts
+      rules:
+      - alert: TrainingJobQueueBacklog
+        expr: sum(keda_scaler_metrics_value{scaler_name="training-job-scaler"}) > 100
+        for: 10m
+        labels:
+          severity: warning
+          component: ml-training
+        annotations:
+          summary: "Training job queue backlog"
+          description: "Training job queue has {{ $value }} pending jobs"
+      
+      - alert: ModelInferenceOverload
+        expr: rate(model_prediction_errors_total[5m]) / rate(model_predictions_total[5m]) > 0.05
+        for: 3m
+        labels:
+          severity: critical
+          component: model-serving
+        annotations:
+          summary: "Model inference overload"
+          description: "Model {{ $labels.model_type }} error rate is {{ $value | humanizePercentage }}"
+      
+      - alert: FeatureStoreLatency
+        expr: histogram_quantile(0.95, rate(feature_store_request_duration_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: feature-store
+        annotations:
+          summary: "Feature store high latency"
+          description: "Feature store 95th percentile latency is {{ $value }}s"
+
+---
+# Grafana Multi-Cloud Dashboard Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-multi-cloud-dashboards
+  namespace: multi-cloud-monitoring
+data:
+  multi-cloud-overview.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "Multi-Cloud MLOps Overview",
+        "tags": ["mlops", "multi-cloud", "clinical-trials"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Cross-Cloud Request Distribution",
+            "type": "piechart",
+            "targets": [
+              {
+                "expr": "sum by (cloud_provider) (rate(istio_requests_total[5m]))",
+                "legendFormat": "{{cloud_provider}}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0}
+          },
+          {
+            "id": 2,
+            "title": "Cloud Region Health",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "count by (cloud_provider, region) (up{job=~\"kubernetes-apiservers-.*\"})",
+                "legendFormat": "{{cloud_provider}} - {{region}}"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {"mode": "thresholds"},
+                "thresholds": {
+                  "steps": [
+                    {"color": "red", "value": 0},
+                    {"color": "green", "value": 1}
+                  ]
+                }
+              }
+            },
+            "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0}
+          },
+          {
+            "id": 3,
+            "title": "Auto-scaling Activity",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum by (cloud_provider) (kube_horizontalpodautoscaler_status_current_replicas)",
+                "legendFormat": "{{cloud_provider}} replicas"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0}
+          },
+          {
+            "id": 4,
+            "title": "Cross-Cloud Latency",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket{source_cluster!=destination_cluster}[5m])) by (le, source_cluster, destination_cluster))",
+                "legendFormat": "{{source_cluster}} -> {{destination_cluster}}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+          },
+          {
+            "id": 5,
+            "title": "Traffic Surge Indicators",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(istio_requests_total[1m])",
+                "legendFormat": "Request Rate"
+              },
+              {
+                "expr": "sum(kube_horizontalpodautoscaler_status_current_replicas) / sum(kube_horizontalpodautoscaler_spec_min_replicas)",
+                "legendFormat": "Scaling Factor"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+          }
+        ],
+        "time": {"from": "now-1h", "to": "now"},
+        "refresh": "30s"
+      }
+    }
+
+  traffic-surge-dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "Traffic Surge Management",
+        "tags": ["mlops", "traffic", "autoscaling"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(istio_requests_total[1m])",
+                "legendFormat": "{{source_app}} -> {{destination_service}}"
+              }
+            ],
+            "alert": {
+              "conditions": [
+                {
+                  "evaluator": {"params": [1000], "type": "gt"},
+                  "operator": {"type": "and"},
+                  "query": {"params": ["A", "1m", "now"]},
+                  "reducer": {"params": [], "type": "avg"},
+                  "type": "query"
+                }
+              ],
+              "executionErrorState": "alerting",
+              "for": "2m",
+              "frequency": "10s",
+              "handler": 1,
+              "name": "Traffic Surge Alert",
+              "noDataState": "no_data",
+              "notifications": []
+            },
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+          },
+          {
+            "id": 2,
+            "title": "Pod Scaling Status",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "kube_horizontalpodautoscaler_status_current_replicas",
+                "legendFormat": "Current: {{horizontalpodautoscaler}}"
+              },
+              {
+                "expr": "kube_horizontalpodautoscaler_spec_max_replicas",
+                "legendFormat": "Max: {{horizontalpodautoscaler}}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+          },
+          {
+            "id": 3,
+            "title": "Resource Utilization",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(container_cpu_usage_seconds_total[5m])",
+                "legendFormat": "CPU: {{pod}}"
+              },
+              {
+                "expr": "container_memory_usage_bytes / 1024 / 1024",
+                "legendFormat": "Memory MB: {{pod}}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8}
+          }
+        ],
+        "time": {"from": "now-1h", "to": "now"},
+        "refresh": "10s"
+      }
+    }
+
+---
+# Thanos for Long-term Storage and Global Query
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thanos-query
+  namespace: multi-cloud-monitoring
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: thanos-query
+  template:
+    metadata:
+      labels:
+        app: thanos-query
+    spec:
+      containers:
+      - name: thanos-query
+        image: thanosio/thanos:v0.32.0
+        args:
+        - query
+        - --http-address=0.0.0.0:9090
+        - --grpc-address=0.0.0.0:10901
+        - --query.replica-label=prometheus_replica
+        - --store=thanos-store-gateway:10901
+        - --store=prometheus-aws:10901
+        - --store=prometheus-azure:10901
+        - --store=prometheus-gcp:10901
+        - --query.auto-downsampling
+        ports:
+        - name: http
+          containerPort: 9090
+        - name: grpc
+          containerPort: 10901
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "100m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+
+---
+# KEDA for Event-driven Auto-scaling
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: model-server-scaler
+  namespace: mlops-clinical-trials
+spec:
+  scaleTargetRef:
+    name: clinical-trials-model-server
+  minReplicaCount: 2
+  maxReplicaCount: 100
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: request_rate
+      threshold: '50'
+      query: rate(istio_requests_total{destination_service_name="clinical-trials-model-server"}[1m])
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: cpu_usage
+      threshold: '70'
+      query: avg(rate(container_cpu_usage_seconds_total{pod=~"clinical-trials-model-server-.*"}[1m])) * 100
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: memory_usage
+      threshold: '80'
+      query: avg(container_memory_usage_bytes{pod=~"clinical-trials-model-server-.*"} / container_spec_memory_limit_bytes) * 100
+
+---
+# Vertical Pod Autoscaler for ML Training Jobs
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: ml-training-vpa
+  namespace: mlops-clinical-trials
+spec:
+  targetRef:
+    apiVersion: batch/v1
+    kind: Job
+    name: ml-training-job
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: model-trainer
+      maxAllowed:
+        cpu: "16"
+        memory: "64Gi"
+      minAllowed:
+        cpu: "1"
+        memory: "2Gi"
+      controlledResources: ["cpu", "memory"]

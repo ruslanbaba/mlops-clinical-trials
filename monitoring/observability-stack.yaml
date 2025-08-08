@@ -1,0 +1,849 @@
+# Comprehensive Observability Stack for MLOps Clinical Trials Platform
+# Advanced monitoring, logging, and alerting across multi-cloud environments
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app: mlops-clinical-trials
+    component: observability
+
+---
+# Prometheus Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: observability
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+      external_labels:
+        cluster: 'mlops-clinical-trials'
+        environment: '${ENVIRONMENT}'
+        cloud_provider: '${CLOUD_PROVIDER}'
+    
+    rule_files:
+      - "/etc/prometheus/rules/*.yml"
+    
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+    
+    scrape_configs:
+      # Kubernetes API Server
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+        - role: endpoints
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: default;kubernetes;https
+      
+      # Kubernetes Nodes
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+        - role: node
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+        - action: labelmap
+          regex: __meta_kubernetes_node_label_(.+)
+        - target_label: __address__
+          replacement: kubernetes.default.svc:443
+        - source_labels: [__meta_kubernetes_node_name]
+          regex: (.+)
+          target_label: __metrics_path__
+          replacement: /api/v1/nodes/${1}/proxy/metrics
+      
+      # Kubernetes Pods
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+        - role: pod
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+        - action: labelmap
+          regex: __meta_kubernetes_pod_label_(.+)
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: kubernetes_pod_name
+      
+      # MLflow Tracking Server
+      - job_name: 'mlflow'
+        static_configs:
+        - targets: ['mlflow-service:5000']
+        metrics_path: '/metrics'
+        scrape_interval: 30s
+      
+      # Model Serving Services
+      - job_name: 'model-servers'
+        kubernetes_sd_configs:
+        - role: service
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_service_label_app]
+          action: keep
+          regex: clinical-trials-.*
+        - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+        - action: labelmap
+          regex: __meta_kubernetes_service_label_(.+)
+      
+      # Database Metrics (PostgreSQL)
+      - job_name: 'postgresql'
+        static_configs:
+        - targets: ['postgres-exporter:9187']
+        scrape_interval: 30s
+      
+      # Redis Metrics
+      - job_name: 'redis'
+        static_configs:
+        - targets: ['redis-exporter:9121']
+        scrape_interval: 30s
+      
+      # MinIO Metrics
+      - job_name: 'minio'
+        static_configs:
+        - targets: ['minio:9000']
+        metrics_path: '/minio/prometheus/metrics'
+        scrape_interval: 30s
+      
+      # Istio Service Mesh Metrics
+      - job_name: 'istio-mesh'
+        kubernetes_sd_configs:
+        - role: endpoints
+          namespaces:
+            names:
+            - istio-system
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: istio-proxy;http-monitoring
+      
+      # Custom Application Metrics
+      - job_name: 'clinical-trials-api'
+        kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+            - mlops-clinical-trials
+            - mlops-clinical-trials-dev
+            - mlops-clinical-trials-staging
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_label_app]
+          action: keep
+          regex: clinical-trials-api
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__address__]
+          action: replace
+          regex: ([^:]+)(?::\d+)?
+          replacement: $1:8080
+          target_label: __address__
+        - source_labels: [__meta_kubernetes_pod_label_model]
+          action: replace
+          target_label: model_type
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: environment
+          regex: mlops-clinical-trials-(.+)
+          replacement: $1
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: environment
+          regex: mlops-clinical-trials
+          replacement: production
+
+  # ML-specific alerting rules
+  ml-alerts.yml: |
+    groups:
+    - name: ml-model-alerts
+      rules:
+      - alert: ModelAccuracyDrop
+        expr: model_accuracy < 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: ml-model
+        annotations:
+          summary: "Model accuracy dropped below threshold"
+          description: "Model {{ $labels.model_type }} accuracy is {{ $value }} which is below the 0.8 threshold"
+      
+      - alert: ModelLatencyHigh
+        expr: histogram_quantile(0.95, rate(model_prediction_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          component: ml-model
+        annotations:
+          summary: "High model prediction latency"
+          description: "95th percentile latency for {{ $labels.model_type }} is {{ $value }}s"
+      
+      - alert: ModelPredictionErrors
+        expr: rate(model_prediction_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          component: ml-model
+        annotations:
+          summary: "High model prediction error rate"
+          description: "Error rate for {{ $labels.model_type }} is {{ $value }} errors/sec"
+      
+      - alert: DataDriftDetected
+        expr: data_drift_score > 0.7
+        for: 10m
+        labels:
+          severity: warning
+          component: data-quality
+        annotations:
+          summary: "Data drift detected"
+          description: "Data drift score is {{ $value }} for {{ $labels.dataset }}"
+      
+      - alert: FeatureImportanceChanged
+        expr: abs(feature_importance_change) > 0.3
+        for: 15m
+        labels:
+          severity: warning
+          component: feature-engineering
+        annotations:
+          summary: "Significant feature importance change"
+          description: "Feature {{ $labels.feature_name }} importance changed by {{ $value }}"
+    
+    - name: infrastructure-alerts
+      rules:
+      - alert: PodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: kubernetes
+        annotations:
+          summary: "Pod is crash looping"
+          description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is crash looping"
+      
+      - alert: HighMemoryUsage
+        expr: (container_memory_usage_bytes / container_spec_memory_limit_bytes) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: kubernetes
+        annotations:
+          summary: "High memory usage"
+          description: "Container {{ $labels.container }} memory usage is {{ $value | humanizePercentage }}"
+      
+      - alert: HighCPUUsage
+        expr: (rate(container_cpu_usage_seconds_total[5m]) / container_spec_cpu_quota * container_spec_cpu_period) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: kubernetes
+        annotations:
+          summary: "High CPU usage"
+          description: "Container {{ $labels.container }} CPU usage is {{ $value | humanizePercentage }}"
+      
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_avail_bytes / node_filesystem_size_bytes)) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: disk
+        annotations:
+          summary: "Low disk space"
+          description: "Disk usage on {{ $labels.instance }} is {{ $value | humanizePercentage }}"
+
+---
+# Grafana Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+  namespace: observability
+data:
+  grafana.ini: |
+    [server]
+    http_port = 3000
+    domain = grafana.mlops.com
+    
+    [database]
+    type = postgres
+    host = postgresql:5432
+    name = grafana
+    user = grafana
+    password = ${GRAFANA_DB_PASSWORD}
+    
+    [security]
+    admin_user = admin
+    admin_password = ${GRAFANA_ADMIN_PASSWORD}
+    secret_key = ${GRAFANA_SECRET_KEY}
+    
+    [auth]
+    disable_login_form = false
+    
+    [auth.oauth]
+    enabled = true
+    
+    [auth.generic_oauth]
+    enabled = true
+    name = OAuth
+    allow_sign_up = true
+    client_id = ${OAUTH_CLIENT_ID}
+    client_secret = ${OAUTH_CLIENT_SECRET}
+    scopes = openid profile email
+    auth_url = ${OAUTH_AUTH_URL}
+    token_url = ${OAUTH_TOKEN_URL}
+    api_url = ${OAUTH_API_URL}
+    
+    [dashboards]
+    default_home_dashboard_path = /var/lib/grafana/dashboards/mlops-overview.json
+    
+    [alerting]
+    enabled = true
+    execute_alerts = true
+    
+    [smtp]
+    enabled = true
+    host = ${SMTP_HOST}:587
+    user = ${SMTP_USER}
+    password = ${SMTP_PASSWORD}
+    from_address = alerts@mlops.com
+    from_name = MLOps Clinical Trials
+
+  # MLOps Overview Dashboard
+  mlops-overview.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "MLOps Clinical Trials - Overview",
+        "tags": ["mlops", "clinical-trials"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Model Accuracy",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "model_accuracy",
+                "legendFormat": "{{model_type}}"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "thresholds"
+                },
+                "thresholds": {
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.8
+                    },
+                    {
+                      "color": "green",
+                      "value": 0.9
+                    }
+                  ]
+                }
+              }
+            },
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": 2,
+            "title": "Prediction Latency",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(model_prediction_duration_seconds_bucket[5m]))",
+                "legendFormat": "95th percentile"
+              },
+              {
+                "expr": "histogram_quantile(0.50, rate(model_prediction_duration_seconds_bucket[5m]))",
+                "legendFormat": "50th percentile"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 0
+            }
+          },
+          {
+            "id": 3,
+            "title": "Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(model_predictions_total[5m])",
+                "legendFormat": "{{model_type}} - {{environment}}"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 0,
+              "y": 8
+            }
+          },
+          {
+            "id": 4,
+            "title": "Error Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(model_prediction_errors_total[5m])",
+                "legendFormat": "{{model_type}} - {{environment}}"
+              }
+            ],
+            "gridPos": {
+              "h": 8,
+              "w": 12,
+              "x": 12,
+              "y": 8
+            }
+          }
+        ],
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "refresh": "30s"
+      }
+    }
+
+---
+# AlertManager Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: observability
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: '${SMTP_HOST}:587'
+      smtp_from: 'alerts@mlops.com'
+      smtp_auth_username: '${SMTP_USER}'
+      smtp_auth_password: '${SMTP_PASSWORD}'
+    
+    route:
+      group_by: ['alertname', 'cluster', 'service']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 1h
+      receiver: 'default-receiver'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'critical-receiver'
+        group_wait: 5s
+        repeat_interval: 30m
+      - match:
+          component: ml-model
+        receiver: 'ml-team-receiver'
+      - match:
+          component: kubernetes
+        receiver: 'infrastructure-receiver'
+    
+    receivers:
+    - name: 'default-receiver'
+      email_configs:
+      - to: 'mlops-team@company.com'
+        subject: '[MLOps] Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Labels: {{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}
+          {{ end }}
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#mlops-alerts'
+        title: 'MLOps Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+    
+    - name: 'critical-receiver'
+      email_configs:
+      - to: 'mlops-oncall@company.com'
+        subject: '[CRITICAL] MLOps Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          CRITICAL ALERT
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Labels: {{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}
+          {{ end }}
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#mlops-critical'
+        title: '🚨 CRITICAL MLOps Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+      pagerduty_configs:
+      - routing_key: '${PAGERDUTY_ROUTING_KEY}'
+        description: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+    
+    - name: 'ml-team-receiver'
+      email_configs:
+      - to: 'ml-engineers@company.com'
+        subject: '[ML Model] Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          ML Model Alert
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Model: {{ .Labels.model_type }}
+          Environment: {{ .Labels.environment }}
+          {{ end }}
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#ml-models'
+        title: '🤖 ML Model Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+    
+    - name: 'infrastructure-receiver'
+      email_configs:
+      - to: 'infrastructure@company.com'
+        subject: '[Infrastructure] Alert: {{ .GroupLabels.alertname }}'
+        body: |
+          Infrastructure Alert
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Component: {{ .Labels.component }}
+          {{ end }}
+      slack_configs:
+      - api_url: '${SLACK_WEBHOOK_URL}'
+        channel: '#infrastructure'
+        title: '🔧 Infrastructure Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+
+---
+# Jaeger Configuration for Distributed Tracing
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-config
+  namespace: observability
+data:
+  jaeger.yml: |
+    receivers:
+      jaeger:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:14250
+          thrift_http:
+            endpoint: 0.0.0.0:14268
+          thrift_compact:
+            endpoint: 0.0.0.0:6831
+          thrift_binary:
+            endpoint: 0.0.0.0:6832
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 50
+      memory_limiter:
+        limit_mib: 512
+    
+    exporters:
+      jaeger:
+        endpoint: jaeger-collector:14250
+        tls:
+          insecure: true
+      elasticsearch:
+        endpoints: [http://elasticsearch:9200]
+        index: jaeger-traces
+    
+    extensions:
+      health_check:
+      pprof:
+      zpages:
+    
+    service:
+      extensions: [health_check, pprof, zpages]
+      pipelines:
+        traces:
+          receivers: [jaeger, otlp]
+          processors: [memory_limiter, batch]
+          exporters: [jaeger, elasticsearch]
+
+---
+# Fluentd Configuration for Log Aggregation
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+  namespace: observability
+data:
+  fluent.conf: |
+    # Input plugins
+    <source>
+      @type tail
+      @id kubernetes_container_logs
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag kubernetes.*
+      read_from_head true
+      <parse>
+        @type json
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
+    </source>
+    
+    <source>
+      @type systemd
+      @id systemd_logs
+      path /var/log/journal
+      matches [{ "_SYSTEMD_UNIT": "kubelet.service" }]
+      read_from_head true
+      tag systemd.kubelet
+      <storage>
+        @type local
+        persistent true
+        path /var/log/fluentd-systemd.pos
+      </storage>
+    </source>
+    
+    # Filter plugins
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+      @id filter_kube_metadata
+    </filter>
+    
+    <filter kubernetes.**>
+      @type parser
+      @id filter_ml_logs
+      key_name message
+      <parse>
+        @type multi_format
+        <pattern>
+          format json
+        </pattern>
+        <pattern>
+          format none
+        </pattern>
+      </parse>
+    </filter>
+    
+    <filter kubernetes.**>
+      @type record_transformer
+      @id filter_ml_enrichment
+      <record>
+        cluster_name "#{ENV['CLUSTER_NAME']}"
+        cloud_provider "#{ENV['CLOUD_PROVIDER']}"
+        environment "#{ENV['ENVIRONMENT']}"
+      </record>
+    </filter>
+    
+    # ML-specific log parsing
+    <filter kubernetes.var.log.containers.**mlops-clinical-trials**.log>
+      @type parser
+      @id filter_ml_model_logs
+      key_name message
+      reserve_data true
+      <parse>
+        @type regexp
+        expression /^(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(?<level>\w+)\] (?<model_type>\w+): (?<message>.*)/
+      </parse>
+    </filter>
+    
+    # Output plugins
+    <match systemd.**>
+      @type elasticsearch
+      @id out_es_systemd
+      host elasticsearch
+      port 9200
+      index_name systemd-logs
+      type_name _doc
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/systemd.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+        chunk_limit_size 2M
+        queue_limit_length 8
+        overflow_action block
+      </buffer>
+    </match>
+    
+    <match kubernetes.**>
+      @type elasticsearch
+      @id out_es_kubernetes
+      host elasticsearch
+      port 9200
+      index_name kubernetes-logs
+      type_name _doc
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/kubernetes.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+        chunk_limit_size 2M
+        queue_limit_length 8
+        overflow_action block
+      </buffer>
+    </match>
+
+---
+# OpenTelemetry Collector Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: observability
+data:
+  otel-collector.yml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      prometheus:
+        config:
+          scrape_configs:
+          - job_name: 'otel-collector'
+            scrape_interval: 10s
+            static_configs:
+            - targets: ['0.0.0.0:8888']
+      k8s_cluster:
+        auth_type: serviceAccount
+      k8s_events:
+        auth_type: serviceAccount
+    
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+      memory_limiter:
+        limit_mib: 512
+      resource:
+        attributes:
+        - key: cluster.name
+          value: ${CLUSTER_NAME}
+          action: upsert
+        - key: cloud.provider
+          value: ${CLOUD_PROVIDER}
+          action: upsert
+        - key: environment
+          value: ${ENVIRONMENT}
+          action: upsert
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        filter:
+          node_from_host_name: true
+        extract:
+          metadata:
+          - k8s.pod.name
+          - k8s.pod.uid
+          - k8s.deployment.name
+          - k8s.namespace.name
+          - k8s.node.name
+          - k8s.pod.start_time
+        pod_association:
+        - sources:
+          - from: resource_attribute
+            name: k8s.pod.ip
+        - sources:
+          - from: resource_attribute
+            name: k8s.pod.uid
+        - sources:
+          - from: connection
+    
+    exporters:
+      prometheus:
+        endpoint: "0.0.0.0:8889"
+      jaeger:
+        endpoint: jaeger-collector:14250
+        tls:
+          insecure: true
+      elasticsearch:
+        endpoints: [http://elasticsearch:9200]
+        index: otel-traces
+        pipeline: otel-pipeline
+      logging:
+        loglevel: info
+    
+    extensions:
+      health_check:
+      pprof:
+        endpoint: 0.0.0.0:1777
+      zpages:
+        endpoint: 0.0.0.0:55679
+    
+    service:
+      extensions: [health_check, pprof, zpages]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [jaeger, elasticsearch]
+        metrics:
+          receivers: [otlp, prometheus, k8s_cluster]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [prometheus]
+        logs:
+          receivers: [otlp, k8s_events]
+          processors: [memory_limiter, k8sattributes, resource, batch]
+          exporters: [elasticsearch]

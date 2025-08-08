@@ -1,0 +1,578 @@
+# Container Security Scanning with Trivy and Advanced Security Policies
+# Comprehensive security scanning for multi-cloud MLOps platform
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security-scanning
+  labels:
+    app: mlops-clinical-trials
+    component: security
+
+---
+# Trivy Operator Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trivy-operator-config
+  namespace: security-scanning
+data:
+  trivy-operator.yaml: |
+    vulnerabilityReports:
+      scanner: Trivy
+      scanJobTolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+      scanJobPodTemplateLabels:
+        app: trivy-scan
+        security-scan: "true"
+      scanJobCompressLogs: true
+      
+    configAuditReports:
+      scanner: Trivy
+      scanJobTolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+    
+    exposedSecretReports:
+      scanner: Trivy
+      
+    clusterComplianceReports:
+      scanner: Trivy
+      
+    rbacAssessmentReports:
+      scanner: Trivy
+    
+    # Scanning policies
+    scanJob:
+      tolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+      annotations:
+        sidecar.istio.io/inject: "false"
+      podSecurityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+        privileged: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65534
+    
+    # Resource limits for scanning jobs
+    resources:
+      requests:
+        cpu: 100m
+        memory: 100M
+        ephemeral-storage: 500Mi
+      limits:
+        cpu: 500m
+        memory: 500M
+        ephemeral-storage: 1Gi
+    
+    # Trivy configuration
+    trivy:
+      ignoreUnfixed: true
+      timeout: "15m"
+      severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+      slowFS: true
+      securityChecks: "vuln,config,secret"
+      dbRepository: "ghcr.io/aquasecurity/trivy-db"
+      javaDbRepository: "ghcr.io/aquasecurity/trivy-java-db"
+      
+    # Compliance standards
+    compliance:
+      cron: "0 1 * * *"  # Daily at 1 AM
+      reportType: "summary"
+      
+    # Metrics and monitoring
+    metrics:
+      resourceLabelsPrefix: "trivy.security.devops.io/"
+      metricsVulnIdEnabled: false
+      exposedSecretMetricsEnabled: true
+
+---
+# Security Scanning CronJob for Container Images
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trivy-image-scanner
+  namespace: security-scanning
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: trivy-scanner
+            component: security
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: trivy-scanner
+          containers:
+          - name: trivy-scanner
+            image: aquasec/trivy:latest
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/sh
+            - -c
+            - |
+              #!/bin/sh
+              set -e
+              
+              echo "Starting security scan for MLOps Clinical Trials images..."
+              
+              # List of images to scan
+              IMAGES=(
+                "mlops-clinical-trials/api:latest"
+                "mlops-clinical-trials/model-server:latest"
+                "mlops-clinical-trials/data-processor:latest"
+                "mlops-clinical-trials/feature-engineer:latest"
+                "mlops-clinical-trials/model-trainer:latest"
+                "mlops-clinical-trials/model-validator:latest"
+                "mlops-clinical-trials/bias-detector:latest"
+                "mlops-clinical-trials/explainer:latest"
+                "mlops-clinical-trials/deployer:latest"
+                "mlops-clinical-trials/ab-tester:latest"
+              )
+              
+              SCAN_RESULTS_DIR="/tmp/scan-results"
+              mkdir -p $SCAN_RESULTS_DIR
+              
+              # Critical vulnerability threshold
+              CRITICAL_THRESHOLD=0
+              HIGH_THRESHOLD=5
+              
+              OVERALL_STATUS="PASS"
+              FAILED_IMAGES=""
+              
+              for IMAGE in "${IMAGES[@]}"; do
+                echo "Scanning image: $IMAGE"
+                
+                # Perform vulnerability scan
+                trivy image --format json --output "$SCAN_RESULTS_DIR/${IMAGE//\//_}_vuln.json" \
+                  --severity HIGH,CRITICAL \
+                  --ignore-unfixed \
+                  --timeout 15m \
+                  "$IMAGE" || {
+                    echo "Failed to scan $IMAGE"
+                    FAILED_IMAGES="$FAILED_IMAGES $IMAGE"
+                    continue
+                  }
+                
+                # Perform configuration scan
+                trivy config --format json --output "$SCAN_RESULTS_DIR/${IMAGE//\//_}_config.json" \
+                  --severity HIGH,CRITICAL \
+                  "$IMAGE" || {
+                    echo "Config scan failed for $IMAGE"
+                  }
+                
+                # Perform secret scan
+                trivy image --format json --output "$SCAN_RESULTS_DIR/${IMAGE//\//_}_secrets.json" \
+                  --scanners secret \
+                  --severity HIGH,CRITICAL \
+                  "$IMAGE" || {
+                    echo "Secret scan failed for $IMAGE"
+                  }
+                
+                # Analyze results
+                CRITICAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' "$SCAN_RESULTS_DIR/${IMAGE//\//_}_vuln.json" 2>/dev/null || echo 0)
+                HIGH_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' "$SCAN_RESULTS_DIR/${IMAGE//\//_}_vuln.json" 2>/dev/null || echo 0)
+                
+                echo "Image: $IMAGE"
+                echo "  Critical vulnerabilities: $CRITICAL_COUNT"
+                echo "  High vulnerabilities: $HIGH_COUNT"
+                
+                if [ "$CRITICAL_COUNT" -gt "$CRITICAL_THRESHOLD" ] || [ "$HIGH_COUNT" -gt "$HIGH_THRESHOLD" ]; then
+                  echo "  ❌ FAILED security scan (Critical: $CRITICAL_COUNT, High: $HIGH_COUNT)"
+                  OVERALL_STATUS="FAIL"
+                  FAILED_IMAGES="$FAILED_IMAGES $IMAGE"
+                else
+                  echo "  ✅ PASSED security scan"
+                fi
+                
+                echo "---"
+              done
+              
+              # Generate summary report
+              cat > "$SCAN_RESULTS_DIR/summary.json" <<EOF
+              {
+                "scan_timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                "overall_status": "$OVERALL_STATUS",
+                "failed_images": "$FAILED_IMAGES",
+                "critical_threshold": $CRITICAL_THRESHOLD,
+                "high_threshold": $HIGH_THRESHOLD,
+                "scanned_images": $(printf '%s\n' "${IMAGES[@]}" | jq -R . | jq -s .)
+              }
+              EOF
+              
+              echo "Security scan completed. Overall status: $OVERALL_STATUS"
+              
+              if [ "$OVERALL_STATUS" = "FAIL" ]; then
+                echo "❌ Security scan failed for images:$FAILED_IMAGES"
+                
+                # Send alert to monitoring system
+                curl -X POST "http://alertmanager:9093/api/v1/alerts" \
+                  -H "Content-Type: application/json" \
+                  -d '[{
+                    "labels": {
+                      "alertname": "SecurityScanFailure",
+                      "severity": "critical",
+                      "component": "security-scanning",
+                      "failed_images": "'"$FAILED_IMAGES"'"
+                    },
+                    "annotations": {
+                      "summary": "Container security scan failed",
+                      "description": "Security vulnerabilities found in images: '"$FAILED_IMAGES"'"
+                    }
+                  }]' || echo "Failed to send alert"
+                
+                exit 1
+              else
+                echo "✅ All images passed security scan"
+              fi
+            
+            env:
+            - name: TRIVY_CACHE_DIR
+              value: /tmp/.cache
+            - name: TRIVY_NO_PROGRESS
+              value: "true"
+            - name: TRIVY_QUIET
+              value: "true"
+            
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "250m"
+              limits:
+                memory: "2Gi"
+                cpu: "1"
+            
+            volumeMounts:
+            - name: cache-volume
+              mountPath: /tmp/.cache
+            - name: scan-results
+              mountPath: /tmp/scan-results
+          
+          volumes:
+          - name: cache-volume
+            emptyDir:
+              sizeLimit: 1Gi
+          - name: scan-results
+            emptyDir:
+              sizeLimit: 500Mi
+
+---
+# Network Security Policies
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mlops-security-policy
+  namespace: mlops-clinical-trials
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  
+  ingress:
+  # Allow ingress from istio-proxy
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: istio-system
+    ports:
+    - protocol: TCP
+      port: 8080
+  
+  # Allow ingress from monitoring namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: observability
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 9090
+  
+  # Allow internal communication within namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: mlops-clinical-trials
+  
+  egress:
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  
+  # Allow connection to databases
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: data-storage
+    ports:
+    - protocol: TCP
+      port: 5432  # PostgreSQL
+    - protocol: TCP
+      port: 6379  # Redis
+    - protocol: TCP
+      port: 9000  # MinIO
+  
+  # Allow connection to MLflow
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: mlflow
+    ports:
+    - protocol: TCP
+      port: 5000
+  
+  # Allow HTTPS egress for external APIs
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  
+  # Allow internal Kubernetes API access
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+# Pod Security Policy
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: mlops-security-policy
+  namespace: mlops-clinical-trials
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    - 'persistentVolumeClaim'
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  seLinux:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+  readOnlyRootFilesystem: true
+  
+---
+# Security Scanning ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trivy-scanner
+  namespace: security-scanning
+
+---
+# Security Scanning ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: trivy-scanner
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes", "namespaces", "configmaps", "secrets"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+  verbs: ["get", "list"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+  verbs: ["get", "list"]
+
+---
+# Security Scanning ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: trivy-scanner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: trivy-scanner
+subjects:
+- kind: ServiceAccount
+  name: trivy-scanner
+  namespace: security-scanning
+
+---
+# Falco Security Rules for Runtime Monitoring
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-rules
+  namespace: security-scanning
+data:
+  mlops_rules.yaml: |
+    - rule: Suspicious Model File Access
+      desc: Detect suspicious access to ML model files
+      condition: >
+        open_read and container and
+        fd.filename glob "*/models/*.pkl" and
+        not proc.name in (model_server, python3, python)
+      output: >
+        Suspicious access to model file
+        (user=%user.name command=%proc.cmdline file=%fd.name container=%container.name)
+      priority: WARNING
+      tags: [mlops, model-security]
+    
+    - rule: Unauthorized Data Access
+      desc: Detect unauthorized access to training data
+      condition: >
+        open_read and container and
+        fd.filename glob "*/data/clinical_trials*.csv" and
+        not proc.name in (data_processor, feature_engineer, python3, python)
+      output: >
+        Unauthorized access to training data
+        (user=%user.name command=%proc.cmdline file=%fd.name container=%container.name)
+      priority: WARNING
+      tags: [mlops, data-security]
+    
+    - rule: Model Inference Anomaly
+      desc: Detect unusual model inference patterns
+      condition: >
+        container and proc.name=model_server and
+        (proc.cpu_usage > 90 or proc.memory_usage > 90)
+      output: >
+        Model inference resource anomaly detected
+        (container=%container.name cpu=%proc.cpu_usage memory=%proc.memory_usage)
+      priority: WARNING
+      tags: [mlops, performance]
+    
+    - rule: Privilege Escalation in ML Container
+      desc: Detect privilege escalation attempts in ML containers
+      condition: >
+        container and
+        k8s.ns.name in (mlops-clinical-trials, mlops-clinical-trials-dev, mlops-clinical-trials-staging) and
+        (setuid or setgid or setreuid or setregid or setresuid or setresgid)
+      output: >
+        Privilege escalation in ML container
+        (user=%user.name command=%proc.cmdline container=%container.name k8s.pod=%k8s.pod.name)
+      priority: CRITICAL
+      tags: [mlops, security, privilege-escalation]
+    
+    - rule: Suspicious Network Activity from ML Pod
+      desc: Detect suspicious network connections from ML pods
+      condition: >
+        outbound and container and
+        k8s.ns.name in (mlops-clinical-trials, mlops-clinical-trials-dev, mlops-clinical-trials-staging) and
+        not fd.net.dip in (cluster_ips) and
+        not fd.net.dport in (80, 443, 5000, 5432, 6379, 9000)
+      output: >
+        Suspicious network connection from ML pod
+        (user=%user.name command=%proc.cmdline connection=%fd.net.cip:%fd.net.cport->%fd.net.sip:%fd.net.sport container=%container.name k8s.pod=%k8s.pod.name)
+      priority: WARNING
+      tags: [mlops, network-security]
+    
+    - rule: Secret Access Outside Allowed Processes
+      desc: Detect access to secrets from unauthorized processes
+      condition: >
+        open_read and container and
+        fd.filename glob "*/secrets/*" and
+        not proc.name in (vault-agent, secret-manager, kubectl)
+      output: >
+        Unauthorized secret access
+        (user=%user.name command=%proc.cmdline file=%fd.name container=%container.name)
+      priority: CRITICAL
+      tags: [mlops, secret-security]
+
+---
+# OPA Gatekeeper Constraints for Security Policies
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: mlopsrequiredsecuritycontext
+spec:
+  crd:
+    spec:
+      names:
+        kind: MLOpsRequiredSecurityContext
+      validation:
+        type: object
+        properties:
+          runAsNonRoot:
+            type: boolean
+          readOnlyRootFilesystem:
+            type: boolean
+          allowPrivilegeEscalation:
+            type: boolean
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package mlopsrequiredsecuritycontext
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.runAsNonRoot
+          msg := sprintf("Container <%v> must run as non-root user", [container.name])
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.readOnlyRootFilesystem
+          msg := sprintf("Container <%v> must have read-only root filesystem", [container.name])
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.allowPrivilegeEscalation != false
+          msg := sprintf("Container <%v> must not allow privilege escalation", [container.name])
+        }
+
+---
+# Apply Security Context Constraint
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: MLOpsRequiredSecurityContext
+metadata:
+  name: mlops-security-context
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: 
+      - mlops-clinical-trials
+      - mlops-clinical-trials-dev
+      - mlops-clinical-trials-staging
+  parameters:
+    runAsNonRoot: true
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false

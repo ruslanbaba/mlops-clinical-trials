@@ -1,0 +1,250 @@
+# ArgoCD Multi-Cloud Application Set for MLOps Clinical Trials Platform
+
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: mlops-clinical-trials-multicloud
+  namespace: argocd
+  labels:
+    app: mlops-clinical-trials
+spec:
+  generators:
+    # Multi-cloud generator for production deployments
+    - clusters:
+        selector:
+          matchLabels:
+            environment: production
+        values:
+          environment: production
+          replicaCount: "3"
+          
+    # Matrix generator for multiple environments and clouds
+    - matrix:
+        generators:
+          - list:
+              elements:
+                - environment: development
+                  branch: develop
+                  replicaCount: "1"
+                  namespace: mlops-clinical-trials-dev
+                - environment: staging
+                  branch: staging
+                  replicaCount: "2"
+                  namespace: mlops-clinical-trials-staging
+                - environment: production
+                  branch: main
+                  replicaCount: "3"
+                  namespace: mlops-clinical-trials
+          - clusters:
+              selector:
+                matchLabels:
+                  provider: aws
+              values:
+                cloud: aws
+                region: us-west-2
+          - clusters:
+              selector:
+                matchLabels:
+                  provider: azure
+              values:
+                cloud: azure
+                region: westus2
+          - clusters:
+              selector:
+                matchLabels:
+                  provider: gcp
+              values:
+                cloud: gcp
+                region: us-central1
+  
+  template:
+    metadata:
+      name: '{{environment}}-{{cloud}}-mlops-clinical-trials'
+      labels:
+        app: mlops-clinical-trials
+        environment: '{{environment}}'
+        cloud: '{{cloud}}'
+    spec:
+      project: default
+      
+      source:
+        repoURL: https://github.com/ruslanbaba/mlops-clinical-trials.git
+        targetRevision: '{{branch}}'
+        path: deployments/kubernetes
+        
+        helm:
+          valueFiles:
+            - values.yaml
+            - 'values-{{environment}}.yaml'
+            - 'values-{{cloud}}.yaml'
+          parameters:
+            - name: image.tag
+              value: '{{branch}}'
+            - name: replicaCount
+              value: '{{replicaCount}}'
+            - name: environment
+              value: '{{environment}}'
+            - name: cloud.provider
+              value: '{{cloud}}'
+            - name: cloud.region
+              value: '{{region}}'
+      
+      destination:
+        name: '{{name}}'
+        namespace: '{{namespace}}'
+      
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: '{{if eq .environment "production"}}false{{else}}true{{end}}'
+        syncOptions:
+          - CreateNamespace=true
+          - PrunePropagationPolicy=foreground
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+      
+      revisionHistoryLimit: 10
+      
+      # Cloud-specific ignore differences
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas
+        - group: v1
+          kind: Service
+          jsonPointers:
+            - /spec/ports
+        - group: networking.k8s.io
+          kind: Ingress
+          jsonPointers:
+            - /metadata/annotations
+
+---
+# ArgoCD Project for MLOps Clinical Trials
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: mlops-clinical-trials
+  namespace: argocd
+spec:
+  description: MLOps Clinical Trials Platform Project
+  
+  # Source repositories
+  sourceRepos:
+    - https://github.com/ruslanbaba/mlops-clinical-trials.git
+    - https://charts.helm.sh/stable
+    - https://prometheus-community.github.io/helm-charts
+    - https://grafana.github.io/helm-charts
+    - https://jaegertracing.github.io/helm-charts
+  
+  # Destination clusters and namespaces
+  destinations:
+    - namespace: 'mlops-clinical-trials*'
+      server: '*'
+    - namespace: monitoring
+      server: '*'
+    - namespace: istio-system
+      server: '*'
+  
+  # Cluster resource whitelist
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+  
+  # Namespace resource whitelist
+  namespaceResourceWhitelist:
+    - group: ''
+      kind: ConfigMap
+    - group: ''
+      kind: Secret
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: ''
+      kind: PersistentVolumeClaim
+    - group: apps
+      kind: Deployment
+    - group: apps
+      kind: StatefulSet
+    - group: apps
+      kind: DaemonSet
+    - group: batch
+      kind: Job
+    - group: batch
+      kind: CronJob
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: metrics.k8s.io
+      kind: PodMetrics
+  
+  # Roles for different environments
+  roles:
+    - name: developer
+      description: Developer access to development environment
+      policies:
+        - p, proj:mlops-clinical-trials:developer, applications, get, mlops-clinical-trials/mlops-clinical-trials-dev-*, allow
+        - p, proj:mlops-clinical-trials:developer, applications, sync, mlops-clinical-trials/mlops-clinical-trials-dev-*, allow
+      groups:
+        - developers
+    
+    - name: staging-deployer
+      description: Staging environment deployment access
+      policies:
+        - p, proj:mlops-clinical-trials:staging-deployer, applications, get, mlops-clinical-trials/mlops-clinical-trials-staging-*, allow
+        - p, proj:mlops-clinical-trials:staging-deployer, applications, sync, mlops-clinical-trials/mlops-clinical-trials-staging-*, allow
+        - p, proj:mlops-clinical-trials:staging-deployer, applications, action/*, mlops-clinical-trials/mlops-clinical-trials-staging-*, allow
+      groups:
+        - staging-deployers
+    
+    - name: production-admin
+      description: Production environment full access
+      policies:
+        - p, proj:mlops-clinical-trials:production-admin, applications, *, mlops-clinical-trials/*, allow
+        - p, proj:mlops-clinical-trials:production-admin, repositories, *, *, allow
+        - p, proj:mlops-clinical-trials:production-admin, clusters, *, *, allow
+      groups:
+        - production-admins
+  
+  # Sync windows for controlled deployments
+  syncWindows:
+    - kind: allow
+      schedule: '0 9-17 * * 1-5'  # Business hours, Monday to Friday
+      duration: 8h
+      applications:
+        - 'mlops-clinical-trials-dev-*'
+        - 'mlops-clinical-trials-staging-*'
+      manualSync: true
+    
+    - kind: deny
+      schedule: '0 18-8 * * *'  # Outside business hours
+      duration: 14h
+      applications:
+        - 'mlops-clinical-trials-production-*'
+      manualSync: false
+      timeZone: America/Los_Angeles
+  
+  # Signature keys for verification
+  signatureKeys:
+    - keyID: pgp-key-id

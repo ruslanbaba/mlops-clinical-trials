@@ -1,0 +1,693 @@
+# Advanced CI/CD Pipeline with Security Scanning and Code Quality
+
+name: MLOps Clinical Trials - Advanced Security & Quality Pipeline
+
+on:
+  push:
+    branches: [ main, develop, staging ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * *'  # Daily security scans
+  workflow_dispatch:  # Manual trigger
+
+env:
+  REGISTRY_AWS: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  REGISTRY_AZURE: ${{ secrets.AZURE_REGISTRY_NAME }}.azurecr.io
+  REGISTRY_GCP: gcr.io/${{ secrets.GCP_PROJECT_ID }}
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+  PYTHON_VERSION_DEFAULT: "3.9"
+
+jobs:
+  # Stage 1: Pre-flight Security and Code Quality
+  security-preflight:
+    name: Security Pre-flight Checks
+    runs-on: ubuntu-latest
+    outputs:
+      security-status: ${{ steps.security-check.outputs.status }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for better analysis
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+    
+    # TruffleHog Secret Scanning
+    - name: TruffleHog Secret Scan
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ${{ github.event.repository.default_branch }}
+        head: HEAD
+        extra_args: --debug --only-verified --fail
+    
+    # GitLeaks Secret Detection
+    - name: GitLeaks Secret Detection
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+    
+    # Semgrep SAST Scanning
+    - name: Semgrep Security Analysis
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/secrets
+          p/python
+          p/dockerfile
+          p/kubernetes
+          p/owasp-top-ten
+        generateSarif: "1"
+        publishToken: ${{ secrets.SEMGREP_APP_TOKEN }}
+    
+    - name: Upload SARIF file
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: semgrep.sarif
+      if: always()
+    
+    - name: Security Check Status
+      id: security-check
+      run: echo "status=passed" >> $GITHUB_OUTPUT
+
+  # Stage 2: Code Quality Analysis with SonarQube
+  code-quality:
+    name: SonarQube Code Quality Analysis
+    runs-on: ubuntu-latest
+    needs: security-preflight
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+    
+    - name: Run tests with coverage
+      run: |
+        pytest tests/ \
+          --cov=src \
+          --cov-report=xml \
+          --cov-report=html \
+          --junit-xml=test-results.xml
+    
+    - name: SonarQube Scan
+      uses: sonarqube-quality-gate-action@master
+      env:
+        SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: SonarQube Analysis
+      run: |
+        wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-4.8.0.2856-linux.zip
+        unzip -q sonar-scanner-cli-4.8.0.2856-linux.zip
+        export PATH=$PATH:$(pwd)/sonar-scanner-4.8.0.2856-linux/bin
+        
+        sonar-scanner \
+          -Dsonar.projectKey=mlops-clinical-trials \
+          -Dsonar.organization=ruslanbaba \
+          -Dsonar.host.url=https://sonarcloud.io \
+          -Dsonar.login=${{ env.SONAR_TOKEN }} \
+          -Dsonar.python.coverage.reportPaths=coverage.xml \
+          -Dsonar.python.xunit.reportPath=test-results.xml \
+          -Dsonar.sources=src/ \
+          -Dsonar.tests=tests/ \
+          -Dsonar.exclusions="**/node_modules/**,**/target/**,**/*.pyc,**/migrations/**" \
+          -Dsonar.coverage.exclusions="**/tests/**,**/migrations/**" \
+          -Dsonar.qualitygate.wait=true
+
+  # Stage 3: Dependency Security Scanning
+  dependency-security:
+    name: Dependency Security Analysis
+    runs-on: ubuntu-latest
+    needs: security-preflight
+    strategy:
+      matrix:
+        scanner: [snyk, safety, pip-audit]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION_DEFAULT }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    # Snyk Vulnerability Scanning
+    - name: Snyk Security Scan
+      if: matrix.scanner == 'snyk'
+      run: |
+        npm install -g snyk
+        snyk auth ${{ env.SNYK_TOKEN }}
+        
+        # Code analysis
+        snyk code test --severity-threshold=medium --json > snyk-code-results.json || true
+        
+        # Dependency analysis
+        snyk test --severity-threshold=high --json > snyk-deps-results.json || true
+        
+        # Container analysis (if Dockerfile exists)
+        if [ -f Dockerfile ]; then
+          snyk container test . --severity-threshold=high --json > snyk-container-results.json || true
+        fi
+        
+        # IaC analysis
+        snyk iac test --severity-threshold=medium --json > snyk-iac-results.json || true
+    
+    # Safety - Python Security
+    - name: Safety Security Check
+      if: matrix.scanner == 'safety'
+      run: |
+        pip install safety
+        safety check --json --output safety-report.json || true
+        safety check --short-report || true
+    
+    # Pip-audit - Python Package Auditing
+    - name: Pip-audit Security Check
+      if: matrix.scanner == 'pip-audit'
+      run: |
+        pip install pip-audit
+        pip-audit --format=json --output=pip-audit-report.json || true
+        pip-audit || true
+    
+    - name: Upload Security Reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports-${{ matrix.scanner }}
+        path: |
+          *-results.json
+          *-report.json
+      if: always()
+
+  # Stage 4: Multi-Version Testing with Enhanced Coverage
+  test-matrix:
+    name: Multi-Version Test Suite
+    runs-on: ${{ matrix.os }}
+    needs: [code-quality, dependency-security]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - python-version: '3.9'
+            os: ubuntu-latest
+            coverage: true
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/pip
+          ~/.cache/pytest
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ matrix.python-version }}-
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov pytest-xdist pytest-benchmark pytest-mock
+    
+    - name: Run comprehensive test suite
+      run: |
+        pytest tests/ \
+          --cov=src \
+          --cov-report=xml \
+          --cov-report=html \
+          --cov-report=term-missing \
+          --junit-xml=test-results-${{ matrix.python-version }}-${{ matrix.os }}.xml \
+          --benchmark-only \
+          --benchmark-json=benchmark-results.json \
+          -n auto \
+          --tb=short \
+          --strict-markers \
+          --strict-config
+    
+    - name: Performance regression tests
+      run: |
+        pytest tests/performance/ \
+          --benchmark-compare=benchmark-results.json \
+          --benchmark-compare-fail=mean:10% \
+          --benchmark-sort=mean
+    
+    - name: Upload test artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results-${{ matrix.python-version }}-${{ matrix.os }}
+        path: |
+          test-results-*.xml
+          htmlcov/
+          benchmark-results.json
+      if: always()
+    
+    - name: Upload coverage to Codecov
+      if: matrix.coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  # Stage 5: Container Security and Building
+  container-security:
+    name: Container Security & Build
+    runs-on: ubuntu-latest
+    needs: test-matrix
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Container Registries
+      run: |
+        # AWS ECR
+        aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | \
+          docker login --username AWS --password-stdin ${{ env.REGISTRY_AWS }}
+        
+        # Azure ACR
+        echo ${{ secrets.AZURE_REGISTRY_PASSWORD }} | \
+          docker login ${{ env.REGISTRY_AZURE }} --username ${{ secrets.AZURE_REGISTRY_USERNAME }} --password-stdin
+        
+        # Google GCR
+        echo ${{ secrets.GCP_SA_KEY }} | base64 -d | \
+          docker login -u _json_key --password-stdin https://gcr.io
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: |
+          ${{ env.REGISTRY_AWS }}/mlops-clinical-trials
+          ${{ env.REGISTRY_AZURE }}/mlops-clinical-trials
+          ${{ env.REGISTRY_GCP }}/mlops-clinical-trials
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=sha,prefix={{branch}}-
+    
+    - name: Build container image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: false
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        outputs: type=docker,dest=/tmp/image.tar
+    
+    - name: Load image for scanning
+      run: docker load -i /tmp/image.tar
+    
+    # Trivy Container Security Scanning
+    - name: Trivy Container Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ steps.meta.outputs.tags }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        exit-code: '1'
+    
+    - name: Upload Trivy results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+      if: always()
+    
+    # Grype Vulnerability Scanner
+    - name: Grype Container Scan
+      uses: anchore/scan-action@v3
+      with:
+        image: ${{ steps.meta.outputs.tags }}
+        fail-build: true
+        severity-cutoff: high
+        output-format: sarif
+    
+    - name: Push multi-cloud container images
+      if: github.event_name != 'pull_request'
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Stage 6: Infrastructure Security Testing
+  infrastructure-security:
+    name: Infrastructure Security Testing
+    runs-on: ubuntu-latest
+    needs: container-security
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.0
+    
+    # Checkov IaC Security Scanning
+    - name: Checkov Infrastructure Scan
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: .
+        framework: terraform,kubernetes,dockerfile
+        output_format: sarif
+        output_file_path: checkov-results.sarif
+        quiet: true
+        soft_fail: false
+    
+    - name: Upload Checkov results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: checkov-results.sarif
+      if: always()
+    
+    # Terraform Security Scanning
+    - name: tfsec Terraform Security Scan
+      uses: aquasecurity/tfsec-sarif-action@v0.1.4
+      with:
+        sarif_file: tfsec.sarif
+    
+    - name: Upload tfsec results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: tfsec.sarif
+      if: always()
+    
+    # KICS Infrastructure Security
+    - name: KICS Infrastructure Scan
+      uses: checkmarx/kics-github-action@v1.7.0
+      with:
+        path: '.'
+        output_formats: 'sarif'
+        output_path: 'kics-results.sarif'
+        platform_type: 'terraform,kubernetes,dockerfile'
+        exclude_categories: 'Encryption,Logging'
+        exclude_severities: 'info,low'
+    
+    - name: Upload KICS results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: kics-results.sarif
+      if: always()
+
+  # Stage 7: Multi-Cloud Deployment
+  deploy-multi-cloud:
+    name: Multi-Cloud Deployment
+    runs-on: ubuntu-latest
+    needs: [container-security, infrastructure-security]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    strategy:
+      matrix:
+        cloud: [aws, azure, gcp]
+        environment: [staging, production]
+        exclude:
+          - environment: production
+            cloud: aws
+          - environment: production
+            cloud: azure
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure Cloud CLI
+      run: |
+        case "${{ matrix.cloud }}" in
+          aws)
+            aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws configure set region ${{ secrets.AWS_REGION }}
+            aws eks update-kubeconfig --name mlops-clinical-trials-${{ matrix.environment }}
+            ;;
+          azure)
+            az login --service-principal -u ${{ secrets.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
+            az aks get-credentials --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} --name mlops-clinical-trials-${{ matrix.environment }}
+            ;;
+          gcp)
+            echo '${{ secrets.GCP_SA_KEY }}' | base64 -d > gcp-key.json
+            gcloud auth activate-service-account --key-file gcp-key.json
+            gcloud container clusters get-credentials mlops-clinical-trials-${{ matrix.environment }} --region ${{ secrets.GCP_REGION }}
+            ;;
+        esac
+    
+    - name: Deploy with Helm and ArgoCD
+      run: |
+        # Install ArgoCD CLI
+        curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+        sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+        
+        # Deploy application
+        argocd app create ${{ matrix.environment }}-${{ matrix.cloud }}-mlops-clinical-trials \
+          --repo https://github.com/ruslanbaba/mlops-clinical-trials.git \
+          --path deployments/kubernetes \
+          --dest-server https://kubernetes.default.svc \
+          --dest-namespace mlops-clinical-trials-${{ matrix.environment }} \
+          --helm-set image.tag=${{ needs.container-security.outputs.image-tag }} \
+          --helm-set environment=${{ matrix.environment }} \
+          --helm-set cloud.provider=${{ matrix.cloud }} \
+          --sync-policy automated \
+          --auto-prune \
+          --self-heal
+        
+        # Wait for deployment
+        argocd app wait ${{ matrix.environment }}-${{ matrix.cloud }}-mlops-clinical-trials --timeout 600
+    
+    - name: Verify Deployment Health
+      run: |
+        kubectl rollout status deployment/clinical-trials-api -n mlops-clinical-trials-${{ matrix.environment }} --timeout=300s
+        kubectl get pods -n mlops-clinical-trials-${{ matrix.environment }}
+        
+        # Health check
+        kubectl run --rm -i --tty debug --image=curlimages/curl --restart=Never -- \
+          curl -f http://clinical-trials-api.mlops-clinical-trials-${{ matrix.environment }}.svc.cluster.local:8080/health
+
+  # Stage 8: Load Testing and Performance Validation
+  load-testing:
+    name: Load Testing & Performance Validation
+    runs-on: ubuntu-latest
+    needs: deploy-multi-cloud
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up k6 Load Testing
+      run: |
+        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+        echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+        sudo apt-get update
+        sudo apt-get install k6
+    
+    - name: Configure kubectl for staging
+      run: |
+        aws eks update-kubeconfig --name mlops-clinical-trials-staging --region ${{ secrets.AWS_REGION }}
+    
+    - name: Run Load Tests
+      run: |
+        # Get service endpoint
+        ENDPOINT=$(kubectl get service clinical-trials-api -n mlops-clinical-trials-staging -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+        
+        # Run progressive load test
+        k6 run --vus 10 --duration 2m tests/load/api_load_test.js \
+          --env ENDPOINT=https://$ENDPOINT \
+          --out json=load-test-results.json
+        
+        # Run spike test to verify auto-scaling
+        k6 run --vus 100 --duration 30s tests/load/spike_test.js \
+          --env ENDPOINT=https://$ENDPOINT \
+          --out json=spike-test-results.json
+    
+    - name: Validate Auto-scaling Response
+      run: |
+        # Check HPA status
+        kubectl get hpa -n mlops-clinical-trials-staging
+        
+        # Verify pod scaling
+        REPLICAS=$(kubectl get deployment clinical-trials-api -n mlops-clinical-trials-staging -o jsonpath='{.status.replicas}')
+        if [ "$REPLICAS" -gt 2 ]; then
+          echo "✅ Auto-scaling triggered successfully"
+        else
+          echo "❌ Auto-scaling did not trigger"
+          exit 1
+        fi
+    
+    - name: Upload Load Test Results
+      uses: actions/upload-artifact@v3
+      with:
+        name: load-test-results
+        path: |
+          load-test-results.json
+          spike-test-results.json
+
+  # Stage 9: Security Compliance Reporting
+  compliance-report:
+    name: Security Compliance Report
+    runs-on: ubuntu-latest
+    needs: [load-testing]
+    if: always()
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+    
+    - name: Generate Compliance Report
+      run: |
+        mkdir -p compliance-report
+        
+        # Aggregate security scan results
+        python3 << 'EOF'
+        import json
+        import os
+        from datetime import datetime
+        
+        report = {
+            "timestamp": datetime.now().isoformat(),
+            "commit_sha": "${{ github.sha }}",
+            "branch": "${{ github.ref_name }}",
+            "security_scans": {},
+            "compliance_status": "UNKNOWN"
+        }
+        
+        # Process security scan results
+        scan_files = [
+            "snyk-code-results.json",
+            "snyk-deps-results.json", 
+            "safety-report.json",
+            "pip-audit-report.json"
+        ]
+        
+        critical_issues = 0
+        high_issues = 0
+        
+        for scan_file in scan_files:
+            if os.path.exists(scan_file):
+                try:
+                    with open(scan_file, 'r') as f:
+                        data = json.load(f)
+                        report["security_scans"][scan_file] = data
+                        # Count issues based on scanner type
+                        if "snyk" in scan_file:
+                            critical_issues += len([v for v in data.get("vulnerabilities", []) if v.get("severity") == "critical"])
+                            high_issues += len([v for v in data.get("vulnerabilities", []) if v.get("severity") == "high"])
+                except:
+                    pass
+        
+        # Determine compliance status
+        if critical_issues == 0 and high_issues < 5:
+            report["compliance_status"] = "PASS"
+        elif critical_issues == 0 and high_issues < 10:
+            report["compliance_status"] = "WARNING"
+        else:
+            report["compliance_status"] = "FAIL"
+        
+        report["summary"] = {
+            "critical_vulnerabilities": critical_issues,
+            "high_vulnerabilities": high_issues,
+            "total_scans_performed": len([f for f in scan_files if os.path.exists(f)])
+        }
+        
+        with open("compliance-report/security-compliance-report.json", "w") as f:
+            json.dump(report, f, indent=2)
+        
+        print(f"Compliance Status: {report['compliance_status']}")
+        print(f"Critical Issues: {critical_issues}")
+        print(f"High Issues: {high_issues}")
+        EOF
+    
+    - name: Upload Compliance Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: compliance-report
+        path: compliance-report/
+    
+    - name: Fail on Critical Security Issues
+      run: |
+        COMPLIANCE_STATUS=$(jq -r '.compliance_status' compliance-report/security-compliance-report.json)
+        if [ "$COMPLIANCE_STATUS" = "FAIL" ]; then
+          echo "❌ Critical security issues found. Deployment blocked."
+          exit 1
+        elif [ "$COMPLIANCE_STATUS" = "WARNING" ]; then
+          echo "⚠️ Security warnings found. Review required."
+        else
+          echo "✅ Security compliance checks passed."
+        fi
+
+  # Notification and Cleanup
+  notify:
+    name: Notify Teams
+    runs-on: ubuntu-latest
+    needs: [compliance-report]
+    if: always()
+    
+    steps:
+    - name: Notify Slack
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#mlops-deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+    
+    - name: Notify PagerDuty on Failure
+      if: failure()
+      uses: PagerDuty/pd-actions@v1
+      with:
+        integration-key: ${{ secrets.PAGERDUTY_INTEGRATION_KEY }}
+        summary: "MLOps Clinical Trials Pipeline Failed"
+        severity: "critical"
+        source: "GitHub Actions"

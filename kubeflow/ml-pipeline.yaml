@@ -1,0 +1,1052 @@
+# Kubeflow Pipelines for MLOps Clinical Trials
+# Advanced ML workflow automation with model training, validation, and deployment
+
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: clinical-trials-ml-pipeline-
+  namespace: kubeflow
+  labels:
+    app: mlops-clinical-trials
+    component: ml-pipeline
+spec:
+  entrypoint: ml-pipeline
+  
+  # Workflow parameters
+  arguments:
+    parameters:
+      - name: dataset-version
+        value: "v1.0.0"
+      - name: model-type
+        value: "xgboost"
+      - name: target-accuracy
+        value: "0.85"
+      - name: environment
+        value: "staging"
+      - name: cloud-provider
+        value: "aws"
+  
+  # Volume templates for data persistence
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: fast-ssd
+  
+  templates:
+    # Main ML pipeline workflow
+    - name: ml-pipeline
+      dag:
+        tasks:
+          # Data preparation phase
+          - name: data-validation
+            template: data-validation-task
+            arguments:
+              parameters:
+                - name: dataset-version
+                  value: "{{workflow.parameters.dataset-version}}"
+          
+          - name: feature-engineering
+            template: feature-engineering-task
+            dependencies: [data-validation]
+            arguments:
+              parameters:
+                - name: dataset-version
+                  value: "{{workflow.parameters.dataset-version}}"
+          
+          # Model training phase
+          - name: model-training
+            template: model-training-task
+            dependencies: [feature-engineering]
+            arguments:
+              parameters:
+                - name: model-type
+                  value: "{{workflow.parameters.model-type}}"
+                - name: dataset-version
+                  value: "{{workflow.parameters.dataset-version}}"
+          
+          # Model validation phase
+          - name: model-validation
+            template: model-validation-task
+            dependencies: [model-training]
+            arguments:
+              parameters:
+                - name: target-accuracy
+                  value: "{{workflow.parameters.target-accuracy}}"
+                - name: model-type
+                  value: "{{workflow.parameters.model-type}}"
+          
+          # Bias detection
+          - name: bias-detection
+            template: bias-detection-task
+            dependencies: [model-validation]
+            arguments:
+              parameters:
+                - name: model-type
+                  value: "{{workflow.parameters.model-type}}"
+          
+          # Model explainability
+          - name: explainability-analysis
+            template: explainability-task
+            dependencies: [model-validation]
+            arguments:
+              parameters:
+                - name: model-type
+                  value: "{{workflow.parameters.model-type}}"
+          
+          # Deployment phase (conditional)
+          - name: model-deployment
+            template: model-deployment-task
+            dependencies: [bias-detection, explainability-analysis]
+            when: "{{tasks.model-validation.outputs.parameters.accuracy}} >= {{workflow.parameters.target-accuracy}}"
+            arguments:
+              parameters:
+                - name: environment
+                  value: "{{workflow.parameters.environment}}"
+                - name: cloud-provider
+                  value: "{{workflow.parameters.cloud-provider}}"
+                - name: model-type
+                  value: "{{workflow.parameters.model-type}}"
+          
+          # A/B testing setup
+          - name: ab-testing-setup
+            template: ab-testing-task
+            dependencies: [model-deployment]
+            when: "{{workflow.parameters.environment}} == 'production'"
+            arguments:
+              parameters:
+                - name: model-type
+                  value: "{{workflow.parameters.model-type}}"
+    
+    # Data validation task template
+    - name: data-validation-task
+      inputs:
+        parameters:
+          - name: dataset-version
+      container:
+        image: mlops-clinical-trials/data-validator:latest
+        imagePullPolicy: IfNotPresent
+        command: [python]
+        args:
+          - -c
+          - |
+            import pandas as pd
+            import numpy as np
+            from great_expectations import DataContext
+            import os
+            import json
+            
+            print(f"Validating dataset version: {{inputs.parameters.dataset-version}}")
+            
+            # Initialize Great Expectations
+            context = DataContext("/app/great_expectations")
+            
+            # Load dataset
+            df = pd.read_csv(f"/data/clinical_trials_{{inputs.parameters.dataset-version}}.csv")
+            
+            # Create batch and run validation
+            batch = context.get_batch({
+                "datasource": "clinical_trials_datasource",
+                "data_connector": "default_runtime_data_connector",
+                "data_asset": df
+            })
+            
+            # Run expectation suite
+            results = context.run_checkpoint(
+                checkpoint_name="clinical_trials_checkpoint",
+                batch_request=batch
+            )
+            
+            # Check validation results
+            if results["success"]:
+                print("✅ Data validation passed")
+                print(f"Dataset shape: {df.shape}")
+                print(f"Missing values: {df.isnull().sum().sum()}")
+            else:
+                print("❌ Data validation failed")
+                exit(1)
+        
+        volumeMounts:
+          - name: workspace
+            mountPath: /data
+        
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+    
+    # Feature engineering task template
+    - name: feature-engineering-task
+      inputs:
+        parameters:
+          - name: dataset-version
+      container:
+        image: mlops-clinical-trials/feature-engineer:latest
+        imagePullPolicy: IfNotPresent
+        command: [python]
+        args:
+          - -c
+          - |
+            import pandas as pd
+            import numpy as np
+            from sklearn.preprocessing import StandardScaler, LabelEncoder
+            from sklearn.feature_selection import SelectKBest, f_classif
+            import joblib
+            import os
+            
+            print(f"Engineering features for dataset: {{inputs.parameters.dataset-version}}")
+            
+            # Load raw data
+            df = pd.read_csv(f"/data/clinical_trials_{{inputs.parameters.dataset-version}}.csv")
+            
+            # Feature engineering pipeline
+            # 1. Handle categorical variables
+            categorical_cols = df.select_dtypes(include=['object']).columns
+            for col in categorical_cols:
+                if col != 'target':
+                    le = LabelEncoder()
+                    df[col] = le.fit_transform(df[col].astype(str))
+                    joblib.dump(le, f"/data/encoders/{col}_encoder.pkl")
+            
+            # 2. Create interaction features
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            for i, col1 in enumerate(numeric_cols[:5]):  # Limit to avoid explosion
+                for col2 in numeric_cols[i+1:6]:
+                    df[f"{col1}_{col2}_interaction"] = df[col1] * df[col2]
+            
+            # 3. Feature selection
+            X = df.drop('target', axis=1)
+            y = df['target']
+            
+            selector = SelectKBest(score_func=f_classif, k=min(50, X.shape[1]))
+            X_selected = selector.fit_transform(X, y)
+            
+            # Save selected features
+            selected_features = X.columns[selector.get_support()].tolist()
+            with open("/data/selected_features.json", "w") as f:
+                json.dump(selected_features, f)
+            
+            # 4. Scale features
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X_selected)
+            
+            # Save processed data
+            processed_df = pd.DataFrame(X_scaled, columns=selected_features)
+            processed_df['target'] = y.values
+            processed_df.to_csv(f"/data/processed_clinical_trials_{{inputs.parameters.dataset-version}}.csv", index=False)
+            
+            # Save preprocessors
+            joblib.dump(scaler, "/data/scaler.pkl")
+            joblib.dump(selector, "/data/feature_selector.pkl")
+            
+            print(f"✅ Feature engineering completed. Selected {len(selected_features)} features")
+        
+        volumeMounts:
+          - name: workspace
+            mountPath: /data
+        
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+    
+    # Model training task template
+    - name: model-training-task
+      inputs:
+        parameters:
+          - name: model-type
+          - name: dataset-version
+      outputs:
+        parameters:
+          - name: model-path
+            valueFrom:
+              path: /tmp/model-path.txt
+      container:
+        image: mlops-clinical-trials/model-trainer:latest
+        imagePullPolicy: IfNotPresent
+        command: [python]
+        args:
+          - -c
+          - |
+            import pandas as pd
+            import numpy as np
+            from sklearn.model_selection import train_test_split, GridSearchCV
+            from sklearn.ensemble import RandomForestClassifier
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.svm import SVC
+            import xgboost as xgb
+            import lightgbm as lgb
+            import mlflow
+            import mlflow.sklearn
+            import mlflow.xgboost
+            import mlflow.lightgbm
+            import joblib
+            import os
+            from datetime import datetime
+            
+            # Configure MLflow
+            mlflow.set_tracking_uri("http://mlflow-service:5000")
+            mlflow.set_experiment("clinical-trials-{{inputs.parameters.model-type}}")
+            
+            print(f"Training {{inputs.parameters.model-type}} model")
+            
+            # Load processed data
+            df = pd.read_csv(f"/data/processed_clinical_trials_{{inputs.parameters.dataset-version}}.csv")
+            X = df.drop('target', axis=1)
+            y = df['target']
+            
+            # Split data
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=y
+            )
+            
+            with mlflow.start_run():
+                model_type = "{{inputs.parameters.model-type}}"
+                
+                # Model selection and hyperparameter tuning
+                if model_type == "xgboost":
+                    param_grid = {
+                        'n_estimators': [100, 200, 300],
+                        'max_depth': [3, 5, 7],
+                        'learning_rate': [0.01, 0.1, 0.2],
+                        'subsample': [0.8, 0.9, 1.0]
+                    }
+                    model = xgb.XGBClassifier(random_state=42)
+                    
+                elif model_type == "lightgbm":
+                    param_grid = {
+                        'n_estimators': [100, 200, 300],
+                        'max_depth': [3, 5, 7],
+                        'learning_rate': [0.01, 0.1, 0.2],
+                        'num_leaves': [31, 50, 100]
+                    }
+                    model = lgb.LGBMClassifier(random_state=42)
+                    
+                elif model_type == "random_forest":
+                    param_grid = {
+                        'n_estimators': [100, 200, 300],
+                        'max_depth': [5, 10, 15],
+                        'min_samples_split': [2, 5, 10],
+                        'min_samples_leaf': [1, 2, 4]
+                    }
+                    model = RandomForestClassifier(random_state=42)
+                
+                else:  # Default to logistic regression
+                    param_grid = {
+                        'C': [0.1, 1.0, 10.0],
+                        'penalty': ['l1', 'l2'],
+                        'solver': ['liblinear', 'saga']
+                    }
+                    model = LogisticRegression(random_state=42, max_iter=1000)
+                
+                # Grid search with cross-validation
+                grid_search = GridSearchCV(
+                    model, param_grid, cv=5, scoring='roc_auc', 
+                    n_jobs=-1, verbose=1
+                )
+                
+                grid_search.fit(X_train, y_train)
+                best_model = grid_search.best_estimator_
+                
+                # Log parameters and metrics
+                mlflow.log_params(grid_search.best_params_)
+                mlflow.log_param("model_type", model_type)
+                mlflow.log_param("dataset_version", "{{inputs.parameters.dataset-version}}")
+                
+                # Evaluate model
+                train_score = best_model.score(X_train, y_train)
+                test_score = best_model.score(X_test, y_test)
+                
+                mlflow.log_metric("train_accuracy", train_score)
+                mlflow.log_metric("test_accuracy", test_score)
+                mlflow.log_metric("cv_best_score", grid_search.best_score_)
+                
+                # Log model
+                if model_type in ["xgboost"]:
+                    mlflow.xgboost.log_model(best_model, "model")
+                elif model_type in ["lightgbm"]:
+                    mlflow.lightgbm.log_model(best_model, "model")
+                else:
+                    mlflow.sklearn.log_model(best_model, "model")
+                
+                # Save model locally
+                model_dir = f"/data/models/{model_type}"
+                os.makedirs(model_dir, exist_ok=True)
+                model_path = f"{model_dir}/model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"
+                joblib.dump(best_model, model_path)
+                
+                # Output model path for next tasks
+                with open("/tmp/model-path.txt", "w") as f:
+                    f.write(model_path)
+                
+                print(f"✅ Model training completed")
+                print(f"   Best CV Score: {grid_search.best_score_:.4f}")
+                print(f"   Test Accuracy: {test_score:.4f}")
+                print(f"   Model saved to: {model_path}")
+        
+        volumeMounts:
+          - name: workspace
+            mountPath: /data
+        
+        resources:
+          requests:
+            memory: "8Gi"
+            cpu: "4"
+          limits:
+            memory: "16Gi"
+            cpu: "8"
+    
+    # Model validation task template
+    - name: model-validation-task
+      inputs:
+        parameters:
+          - name: target-accuracy
+          - name: model-type
+      outputs:
+        parameters:
+          - name: accuracy
+            valueFrom:
+              path: /tmp/accuracy.txt
+          - name: validation-passed
+            valueFrom:
+              path: /tmp/validation-passed.txt
+      container:
+        image: mlops-clinical-trials/model-validator:latest
+        imagePullPolicy: IfNotPresent
+        command: [python]
+        args:
+          - -c
+          - |
+            import pandas as pd
+            import numpy as np
+            from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+            from sklearn.model_selection import cross_val_score
+            import joblib
+            import os
+            import glob
+            
+            print(f"Validating {{inputs.parameters.model-type}} model")
+            print(f"Target accuracy threshold: {{inputs.parameters.target-accuracy}}")
+            
+            # Load the latest model
+            model_dir = "/data/models/{{inputs.parameters.model-type}}"
+            model_files = glob.glob(f"{model_dir}/model_*.pkl")
+            latest_model_path = max(model_files, key=os.path.getctime)
+            model = joblib.load(latest_model_path)
+            
+            # Load test data
+            df = pd.read_csv("/data/processed_clinical_trials_v1.0.0.csv")
+            X = df.drop('target', axis=1)
+            y = df['target']
+            
+            # Cross-validation
+            cv_scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')
+            cv_mean = cv_scores.mean()
+            cv_std = cv_scores.std()
+            
+            # Additional metrics
+            y_pred = model.predict(X)
+            y_pred_proba = model.predict_proba(X)[:, 1] if hasattr(model, 'predict_proba') else y_pred
+            
+            accuracy = accuracy_score(y, y_pred)
+            precision = precision_score(y, y_pred, average='weighted')
+            recall = recall_score(y, y_pred, average='weighted')
+            f1 = f1_score(y, y_pred, average='weighted')
+            
+            try:
+                auc = roc_auc_score(y, y_pred_proba)
+            except:
+                auc = 0.0
+            
+            # Validation checks
+            target_acc = float("{{inputs.parameters.target-accuracy}}")
+            validation_passed = accuracy >= target_acc
+            
+            # Output results
+            with open("/tmp/accuracy.txt", "w") as f:
+                f.write(str(accuracy))
+            
+            with open("/tmp/validation-passed.txt", "w") as f:
+                f.write(str(validation_passed).lower())
+            
+            print(f"✅ Model validation completed")
+            print(f"   Accuracy: {accuracy:.4f} (Target: {target_acc:.4f})")
+            print(f"   CV Mean: {cv_mean:.4f} ± {cv_std:.4f}")
+            print(f"   Precision: {precision:.4f}")
+            print(f"   Recall: {recall:.4f}")
+            print(f"   F1-Score: {f1:.4f}")
+            print(f"   AUC: {auc:.4f}")
+            print(f"   Validation Passed: {validation_passed}")
+        
+        volumeMounts:
+          - name: workspace
+            mountPath: /data
+        
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+    
+    # Bias detection task template
+    - name: bias-detection-task
+      inputs:
+        parameters:
+          - name: model-type
+      container:
+        image: mlops-clinical-trials/bias-detector:latest
+        imagePullPolicy: IfNotPresent
+        command: [python]
+        args:
+          - -c
+          - |
+            import pandas as pd
+            import numpy as np
+            from fairlearn.metrics import MetricFrame, selection_rate, equalized_odds_difference
+            from fairlearn.postprocessing import ThresholdOptimizer
+            import joblib
+            import os
+            import glob
+            import json
+            
+            print(f"Analyzing bias for {{inputs.parameters.model-type}} model")
+            
+            # Load model and data
+            model_dir = "/data/models/{{inputs.parameters.model-type}}"
+            model_files = glob.glob(f"{model_dir}/model_*.pkl")
+            latest_model_path = max(model_files, key=os.path.getctime)
+            model = joblib.load(latest_model_path)
+            
+            df = pd.read_csv("/data/processed_clinical_trials_v1.0.0.csv")
+            
+            # For demonstration, create synthetic sensitive attributes
+            np.random.seed(42)
+            sensitive_features = {
+                'age_group': np.random.choice(['young', 'middle', 'senior'], size=len(df)),
+                'gender': np.random.choice(['male', 'female'], size=len(df)),
+                'ethnicity': np.random.choice(['white', 'black', 'hispanic', 'asian'], size=len(df))
+            }
+            
+            X = df.drop('target', axis=1)
+            y = df['target']
+            y_pred = model.predict(X)
+            
+            bias_results = {}
+            
+            for attr_name, attr_values in sensitive_features.items():
+                print(f"Analyzing bias for: {attr_name}")
+                
+                # Calculate fairness metrics
+                mf = MetricFrame(
+                    metrics={
+                        'accuracy': lambda y_true, y_pred: (y_true == y_pred).mean(),
+                        'selection_rate': selection_rate
+                    },
+                    y_true=y,
+                    y_pred=y_pred,
+                    sensitive_features=attr_values
+                )
+                
+                # Calculate equalized odds difference
+                eod = equalized_odds_difference(y, y_pred, sensitive_features=attr_values)
+                
+                bias_results[attr_name] = {
+                    'accuracy_by_group': mf.by_group['accuracy'].to_dict(),
+                    'selection_rate_by_group': mf.by_group['selection_rate'].to_dict(),
+                    'equalized_odds_difference': eod,
+                    'overall_accuracy': mf.overall['accuracy'],
+                    'overall_selection_rate': mf.overall['selection_rate']
+                }
+                
+                print(f"  Equalized Odds Difference: {eod:.4f}")
+                print(f"  Accuracy by group: {mf.by_group['accuracy'].to_dict()}")
+            
+            # Save bias analysis results
+            with open("/data/bias_analysis_results.json", "w") as f:
+                json.dump(bias_results, f, indent=2, default=str)
+            
+            # Check if bias is within acceptable limits
+            max_eod = max([result['equalized_odds_difference'] for result in bias_results.values()])
+            bias_threshold = 0.1  # 10% threshold
+            
+            if max_eod <= bias_threshold:
+                print(f"✅ Bias analysis passed (Max EOD: {max_eod:.4f} <= {bias_threshold})")
+            else:
+                print(f"⚠️  Bias detected (Max EOD: {max_eod:.4f} > {bias_threshold})")
+                print("   Consider model debiasing techniques")
+        
+        volumeMounts:
+          - name: workspace
+            mountPath: /data
+        
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+    
+    # Model explainability task template
+    - name: explainability-task
+      inputs:
+        parameters:
+          - name: model-type
+      container:
+        image: mlops-clinical-trials/explainer:latest
+        imagePullPolicy: IfNotPresent
+        command: [python]
+        args:
+          - -c
+          - |
+            import pandas as pd
+            import numpy as np
+            import shap
+            import lime
+            import lime.lime_tabular
+            import joblib
+            import os
+            import glob
+            import json
+            import matplotlib.pyplot as plt
+            
+            print(f"Generating explanations for {{inputs.parameters.model-type}} model")
+            
+            # Load model and data
+            model_dir = "/data/models/{{inputs.parameters.model-type}}"
+            model_files = glob.glob(f"{model_dir}/model_*.pkl")
+            latest_model_path = max(model_files, key=os.path.getctime)
+            model = joblib.load(latest_model_path)
+            
+            df = pd.read_csv("/data/processed_clinical_trials_v1.0.0.csv")
+            X = df.drop('target', axis=1)
+            y = df['target']
+            
+            # Load feature names
+            with open("/data/selected_features.json", "r") as f:
+                feature_names = json.load(f)
+            
+            # SHAP explanations
+            print("Generating SHAP explanations...")
+            try:
+                if "{{inputs.parameters.model-type}}" in ["xgboost", "lightgbm"]:
+                    explainer = shap.TreeExplainer(model)
+                else:
+                    explainer = shap.Explainer(model, X[:100])  # Use subset for efficiency
+                
+                shap_values = explainer.shap_values(X[:100])
+                
+                # Global feature importance
+                if isinstance(shap_values, list):
+                    shap_values_for_importance = shap_values[1]  # For binary classification
+                else:
+                    shap_values_for_importance = shap_values
+                
+                feature_importance = np.abs(shap_values_for_importance).mean(0)
+                importance_dict = dict(zip(feature_names, feature_importance))
+                
+                # Sort by importance
+                sorted_features = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)
+                
+                # Save top 10 important features
+                top_features = dict(sorted_features[:10])
+                
+                explainability_results = {
+                    'shap_feature_importance': top_features,
+                    'model_type': "{{inputs.parameters.model-type}}",
+                    'explanation_method': 'SHAP'
+                }
+                
+                print("Top 10 most important features (SHAP):")
+                for feature, importance in sorted_features[:10]:
+                    print(f"  {feature}: {importance:.4f}")
+                
+            except Exception as e:
+                print(f"SHAP analysis failed: {e}")
+                # Fallback to feature importance from model
+                if hasattr(model, 'feature_importances_'):
+                    importance_dict = dict(zip(feature_names, model.feature_importances_))
+                    sorted_features = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)
+                    top_features = dict(sorted_features[:10])
+                    
+                    explainability_results = {
+                        'model_feature_importance': top_features,
+                        'model_type': "{{inputs.parameters.model-type}}",
+                        'explanation_method': 'Model_Built_in'
+                    }
+                else:
+                    explainability_results = {
+                        'error': 'Could not generate explanations',
+                        'model_type': "{{inputs.parameters.model-type}}"
+                    }
+            
+            # LIME explanations for a few samples
+            print("Generating LIME explanations...")
+            try:
+                explainer_lime = lime.lime_tabular.LimeTabularExplainer(
+                    X.values[:1000],  # Training data subset
+                    feature_names=feature_names,
+                    class_names=['No Event', 'Event'],
+                    mode='classification'
+                )
+                
+                # Explain first 3 instances
+                lime_explanations = []
+                for i in range(min(3, len(X))):
+                    exp = explainer_lime.explain_instance(X.iloc[i].values, model.predict_proba, num_features=5)
+                    lime_explanations.append({
+                        'instance': i,
+                        'prediction': int(model.predict([X.iloc[i].values])[0]),
+                        'explanation': exp.as_list()
+                    })
+                
+                explainability_results['lime_explanations'] = lime_explanations
+                
+            except Exception as e:
+                print(f"LIME analysis failed: {e}")
+            
+            # Save results
+            with open("/data/explainability_results.json", "w") as f:
+                json.dump(explainability_results, f, indent=2, default=str)
+            
+            print("✅ Explainability analysis completed")
+        
+        volumeMounts:
+          - name: workspace
+            mountPath: /data
+        
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+    
+    # Model deployment task template
+    - name: model-deployment-task
+      inputs:
+        parameters:
+          - name: environment
+          - name: cloud-provider
+          - name: model-type
+      container:
+        image: mlops-clinical-trials/deployer:latest
+        imagePullPolicy: IfNotPresent
+        command: [python]
+        args:
+          - -c
+          - |
+            import os
+            import json
+            import subprocess
+            import glob
+            from datetime import datetime
+            
+            print(f"Deploying {{inputs.parameters.model-type}} model to {{inputs.parameters.environment}} on {{inputs.parameters.cloud-provider}}")
+            
+            # Get latest model
+            model_dir = "/data/models/{{inputs.parameters.model-type}}"
+            model_files = glob.glob(f"{model_dir}/model_*.pkl")
+            latest_model_path = max(model_files, key=os.path.getctime)
+            
+            # Prepare deployment configuration
+            deployment_config = {
+                'model_path': latest_model_path,
+                'model_type': "{{inputs.parameters.model-type}}",
+                'environment': "{{inputs.parameters.environment}}",
+                'cloud_provider': "{{inputs.parameters.cloud-provider}}",
+                'deployment_time': datetime.now().isoformat(),
+                'version': f"{{inputs.parameters.model-type}}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            }
+            
+            # Cloud-specific deployment
+            cloud = "{{inputs.parameters.cloud-provider}}"
+            env = "{{inputs.parameters.environment}}"
+            
+            if cloud == "aws":
+                # Deploy to AWS EKS
+                kubectl_cmd = f"""
+                kubectl apply -f - <<EOF
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: clinical-trials-{env}-{{inputs.parameters.model-type}}
+              namespace: mlops-clinical-trials-{env}
+            spec:
+              replicas: 2
+              selector:
+                matchLabels:
+                  app: clinical-trials-{env}
+                  model: {{inputs.parameters.model-type}}
+              template:
+                metadata:
+                  labels:
+                    app: clinical-trials-{env}
+                    model: {{inputs.parameters.model-type}}
+                spec:
+                  containers:
+                  - name: model-server
+                    image: mlops-clinical-trials/model-server:latest
+                    ports:
+                    - containerPort: 8080
+                    env:
+                    - name: MODEL_TYPE
+                      value: "{{inputs.parameters.model-type}}"
+                    - name: ENVIRONMENT
+                      value: "{env}"
+                    resources:
+                      requests:
+                        memory: "1Gi"
+                        cpu: "500m"
+                      limits:
+                        memory: "2Gi"
+                        cpu: "1"
+            EOF
+                """
+                
+            elif cloud == "azure":
+                # Deploy to Azure AKS
+                kubectl_cmd = f"""
+                kubectl apply -f - <<EOF
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: clinical-trials-{env}-{{inputs.parameters.model-type}}
+              namespace: mlops-clinical-trials-{env}
+              annotations:
+                azure.workload.identity/use: "true"
+            spec:
+              replicas: 2
+              selector:
+                matchLabels:
+                  app: clinical-trials-{env}
+                  model: {{inputs.parameters.model-type}}
+              template:
+                metadata:
+                  labels:
+                    app: clinical-trials-{env}
+                    model: {{inputs.parameters.model-type}}
+                    azure.workload.identity/use: "true"
+                spec:
+                  serviceAccountName: mlops-workload-identity
+                  containers:
+                  - name: model-server
+                    image: mlops-clinical-trials/model-server:latest
+                    ports:
+                    - containerPort: 8080
+                    env:
+                    - name: MODEL_TYPE
+                      value: "{{inputs.parameters.model-type}}"
+                    - name: ENVIRONMENT
+                      value: "{env}"
+                    - name: AZURE_CLIENT_ID
+                      value: "azure-workload-identity-client-id"
+            EOF
+                """
+                
+            else:  # GCP
+                # Deploy to Google GKE
+                kubectl_cmd = f"""
+                kubectl apply -f - <<EOF
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: clinical-trials-{env}-{{inputs.parameters.model-type}}
+              namespace: mlops-clinical-trials-{env}
+            spec:
+              replicas: 2
+              selector:
+                matchLabels:
+                  app: clinical-trials-{env}
+                  model: {{inputs.parameters.model-type}}
+              template:
+                metadata:
+                  labels:
+                    app: clinical-trials-{env}
+                    model: {{inputs.parameters.model-type}}
+                spec:
+                  serviceAccountName: mlops-gsa
+                  containers:
+                  - name: model-server
+                    image: mlops-clinical-trials/model-server:latest
+                    ports:
+                    - containerPort: 8080
+                    env:
+                    - name: MODEL_TYPE
+                      value: "{{inputs.parameters.model-type}}"
+                    - name: ENVIRONMENT
+                      value: "{env}"
+                    - name: GOOGLE_APPLICATION_CREDENTIALS
+                      value: "/var/secrets/google/key.json"
+                    volumeMounts:
+                    - name: google-cloud-key
+                      mountPath: /var/secrets/google
+                  volumes:
+                  - name: google-cloud-key
+                    secret:
+                      secretName: google-cloud-key
+            EOF
+                """
+            
+            # Execute deployment
+            try:
+                result = subprocess.run(kubectl_cmd, shell=True, capture_output=True, text=True)
+                if result.returncode == 0:
+                    print("✅ Deployment successful")
+                    deployment_config['status'] = 'success'
+                    deployment_config['kubectl_output'] = result.stdout
+                else:
+                    print(f"❌ Deployment failed: {result.stderr}")
+                    deployment_config['status'] = 'failed'
+                    deployment_config['error'] = result.stderr
+                    exit(1)
+            except Exception as e:
+                print(f"❌ Deployment error: {e}")
+                deployment_config['status'] = 'error'
+                deployment_config['error'] = str(e)
+                exit(1)
+            
+            # Save deployment info
+            with open("/data/deployment_info.json", "w") as f:
+                json.dump(deployment_config, f, indent=2)
+            
+            print(f"✅ Model deployed successfully to {env} environment on {cloud}")
+        
+        volumeMounts:
+          - name: workspace
+            mountPath: /data
+        
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+    
+    # A/B testing setup task template
+    - name: ab-testing-task
+      inputs:
+        parameters:
+          - name: model-type
+      container:
+        image: mlops-clinical-trials/ab-tester:latest
+        imagePullPolicy: IfNotPresent
+        command: [python]
+        args:
+          - -c
+          - |
+            import json
+            import subprocess
+            from datetime import datetime
+            
+            print(f"Setting up A/B testing for {{inputs.parameters.model-type}} model")
+            
+            # Create Istio VirtualService for A/B testing
+            virtual_service_config = f"""
+            apiVersion: networking.istio.io/v1beta1
+            kind: VirtualService
+            metadata:
+              name: clinical-trials-ab-test
+              namespace: mlops-clinical-trials
+            spec:
+              hosts:
+              - clinical-trials-api.mlops.com
+              http:
+              - match:
+                - headers:
+                    x-user-type:
+                      exact: beta
+                route:
+                - destination:
+                    host: clinical-trials-production-{{inputs.parameters.model-type}}
+                    subset: v2
+                  weight: 100
+              - route:
+                - destination:
+                    host: clinical-trials-production-{{inputs.parameters.model-type}}
+                    subset: v1
+                  weight: 80
+                - destination:
+                    host: clinical-trials-production-{{inputs.parameters.model-type}}
+                    subset: v2
+                  weight: 20
+            ---
+            apiVersion: networking.istio.io/v1beta1
+            kind: DestinationRule
+            metadata:
+              name: clinical-trials-destination-rule
+              namespace: mlops-clinical-trials
+            spec:
+              host: clinical-trials-production-{{inputs.parameters.model-type}}
+              subsets:
+              - name: v1
+                labels:
+                  version: v1
+              - name: v2
+                labels:
+                  version: v2
+            """
+            
+            # Apply Istio configuration
+            try:
+                result = subprocess.run(
+                    f"echo '{virtual_service_config}' | kubectl apply -f -",
+                    shell=True, capture_output=True, text=True
+                )
+                
+                if result.returncode == 0:
+                    print("✅ A/B testing configuration applied successfully")
+                    
+                    # Save A/B test configuration
+                    ab_config = {
+                        'model_type': "{{inputs.parameters.model-type}}",
+                        'test_start_time': datetime.now().isoformat(),
+                        'traffic_split': {
+                            'v1_baseline': 80,
+                            'v2_candidate': 20
+                        },
+                        'beta_users': 'v2_only',
+                        'status': 'active'
+                    }
+                    
+                    with open("/data/ab_test_config.json", "w") as f:
+                        json.dump(ab_config, f, indent=2)
+                    
+                    print("A/B test configuration:")
+                    print(f"  - Baseline (v1): 80% traffic")
+                    print(f"  - Candidate (v2): 20% traffic")
+                    print(f"  - Beta users: 100% to v2")
+                    
+                else:
+                    print(f"❌ A/B testing setup failed: {result.stderr}")
+                    exit(1)
+                    
+            except Exception as e:
+                print(f"❌ A/B testing setup error: {e}")
+                exit(1)
+        
+        volumeMounts:
+          - name: workspace
+            mountPath: /data
+        
+        resources:
+          requests:
+            memory: "500Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"

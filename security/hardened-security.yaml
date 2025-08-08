@@ -1,0 +1,831 @@
+# Hardened Security Configuration for Multi-Cloud MLOps Platform
+# Advanced security policies, IAM, network security, and cloud-native security controls
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security-hardening
+  labels:
+    app: mlops-clinical-trials
+    component: security
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+---
+# AWS IAM Roles and Policies
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-iam-policies
+  namespace: security-hardening
+data:
+  mlops-pod-execution-role.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "s3:GetObject",
+            "s3:PutObject",
+            "s3:DeleteObject"
+          ],
+          "Resource": [
+            "arn:aws:s3:::mlops-clinical-trials-${ENVIRONMENT}/*",
+            "arn:aws:s3:::mlops-clinical-trials-models-${ENVIRONMENT}/*"
+          ]
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "secretsmanager:GetSecretValue"
+          ],
+          "Resource": [
+            "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:mlops/clinical-trials/*"
+          ]
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "kms:Decrypt",
+            "kms:DescribeKey"
+          ],
+          "Resource": [
+            "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/${KMS_KEY_ID}"
+          ]
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "logs:CreateLogGroup",
+            "logs:CreateLogStream",
+            "logs:PutLogEvents"
+          ],
+          "Resource": "arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:/aws/eks/mlops-clinical-trials/*"
+        },
+        {
+          "Effect": "Deny",
+          "Action": [
+            "iam:*",
+            "sts:AssumeRole"
+          ],
+          "Resource": "*",
+          "Condition": {
+            "StringNotEquals": {
+              "aws:RequestedRegion": ["${AWS_REGION}"]
+            }
+          }
+        }
+      ]
+    }
+
+  node-group-role.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ec2:DescribeInstances",
+            "ec2:DescribeNetworkInterfaces",
+            "ec2:DescribeSecurityGroups",
+            "ec2:DescribeSubnets",
+            "ec2:DescribeVpcs"
+          ],
+          "Resource": "*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ecr:BatchCheckLayerAvailability",
+            "ecr:GetDownloadUrlForLayer",
+            "ecr:BatchGetImage"
+          ],
+          "Resource": "arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/mlops-clinical-trials/*"
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ecr:GetAuthorizationToken"
+          ],
+          "Resource": "*"
+        }
+      ]
+    }
+
+---
+# Azure RBAC and Managed Identity Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: azure-rbac-config
+  namespace: security-hardening
+data:
+  workload-identity-role.json: |
+    {
+      "properties": {
+        "roleName": "MLOps Clinical Trials Workload Identity",
+        "description": "Custom role for MLOps Clinical Trials workload identity",
+        "assignableScopes": [
+          "/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}"
+        ],
+        "permissions": [
+          {
+            "actions": [
+              "Microsoft.Storage/storageAccounts/blobServices/containers/read",
+              "Microsoft.Storage/storageAccounts/blobServices/containers/write",
+              "Microsoft.Storage/storageAccounts/blobServices/generateUserDelegationKey/action"
+            ],
+            "notActions": [
+              "Microsoft.Storage/storageAccounts/delete",
+              "Microsoft.Storage/storageAccounts/write"
+            ],
+            "dataActions": [
+              "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read",
+              "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write",
+              "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/delete"
+            ],
+            "notDataActions": []
+          }
+        ]
+      }
+    }
+
+  key-vault-policy.json: |
+    {
+      "properties": {
+        "tenantId": "${AZURE_TENANT_ID}",
+        "accessPolicies": [
+          {
+            "tenantId": "${AZURE_TENANT_ID}",
+            "objectId": "${AZURE_WORKLOAD_IDENTITY_OBJECT_ID}",
+            "permissions": {
+              "keys": [],
+              "secrets": [
+                "get",
+                "list"
+              ],
+              "certificates": []
+            }
+          }
+        ]
+      }
+    }
+
+---
+# GCP IAM Service Account and Policies
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gcp-iam-config
+  namespace: security-hardening
+data:
+  workload-identity-binding.yaml: |
+    apiVersion: iam.cnrm.cloud.google.com/v1beta1
+    kind: IAMServiceAccount
+    metadata:
+      name: mlops-clinical-trials-sa
+      namespace: security-hardening
+      annotations:
+        iam.gke.io/gcp-service-account: mlops-clinical-trials@${GCP_PROJECT_ID}.iam.gserviceaccount.com
+    spec:
+      displayName: "MLOps Clinical Trials Service Account"
+    ---
+    apiVersion: iam.cnrm.cloud.google.com/v1beta1
+    kind: IAMPolicy
+    metadata:
+      name: mlops-workload-identity-policy
+      namespace: security-hardening
+    spec:
+      resourceRef:
+        apiVersion: iam.cnrm.cloud.google.com/v1beta1
+        kind: IAMServiceAccount
+        name: mlops-clinical-trials-sa
+      bindings:
+      - role: roles/storage.objectViewer
+        members:
+        - serviceAccount:${GCP_PROJECT_ID}.svc.id.goog[mlops-clinical-trials/clinical-trials-api]
+      - role: roles/secretmanager.secretAccessor
+        members:
+        - serviceAccount:${GCP_PROJECT_ID}.svc.id.goog[mlops-clinical-trials/clinical-trials-api]
+      - role: roles/monitoring.metricWriter
+        members:
+        - serviceAccount:${GCP_PROJECT_ID}.svc.id.goog[mlops-clinical-trials/clinical-trials-api]
+
+  custom-role.yaml: |
+    apiVersion: iam.cnrm.cloud.google.com/v1beta1
+    kind: IAMCustomRole
+    metadata:
+      name: mlops-clinical-trials-role
+      namespace: security-hardening
+    spec:
+      title: "MLOps Clinical Trials Custom Role"
+      description: "Custom role for MLOps Clinical Trials platform"
+      stage: "GA"
+      permissions:
+      - "storage.objects.get"
+      - "storage.objects.create"
+      - "storage.objects.delete"
+      - "secretmanager.versions.access"
+      - "monitoring.timeSeries.create"
+      - "logging.logEntries.create"
+
+---
+# Advanced Network Security Policies
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mlops-zero-trust-policy
+  namespace: mlops-clinical-trials
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  
+  ingress:
+  # Allow ingress only from specific namespaces with proper labels
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: istio-system
+      podSelector:
+        matchLabels:
+          app: istio-proxy
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 15090  # Envoy admin
+  
+  # Allow monitoring from observability namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: multi-cloud-monitoring
+      podSelector:
+        matchLabels:
+          component: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+    - protocol: TCP
+      port: 8080
+  
+  # Allow internal communication within namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: mlops-clinical-trials
+    - podSelector: {}
+  
+  egress:
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  
+  # Allow connection to secure databases only
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: data-storage
+      podSelector:
+        matchLabels:
+          component: postgresql
+    ports:
+    - protocol: TCP
+      port: 5432
+  
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: data-storage
+      podSelector:
+        matchLabels:
+          component: redis
+    ports:
+    - protocol: TCP
+      port: 6380  # TLS port
+  
+  # Allow HTTPS egress for cloud APIs (with strict destination rules)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    # Apply Istio DestinationRule for mTLS
+
+---
+# Istio Security Policies
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: mlops-mtls-strict
+  namespace: mlops-clinical-trials
+spec:
+  mtls:
+    mode: STRICT
+
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: mlops-rbac-policy
+  namespace: mlops-clinical-trials
+spec:
+  rules:
+  # Allow requests from frontend to API
+  - from:
+    - source:
+        principals: ["cluster.local/ns/mlops-clinical-trials/sa/frontend-service"]
+    to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/api/v1/predict", "/api/v1/health"]
+  
+  # Allow monitoring access
+  - from:
+    - source:
+        namespaces: ["multi-cloud-monitoring"]
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/metrics", "/health"]
+  
+  # Deny all other traffic
+  - action: DENY
+    when:
+    - key: source.namespace
+      notValues: ["mlops-clinical-trials", "multi-cloud-monitoring", "istio-system"]
+
+---
+# Pod Security Standards
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pod-security-policies
+  namespace: security-hardening
+data:
+  restricted-policy.yaml: |
+    apiVersion: policy/v1beta1
+    kind: PodSecurityPolicy
+    metadata:
+      name: mlops-restricted
+      annotations:
+        seccomp.security.alpha.kubernetes.io/allowedProfileNames: 'runtime/default'
+        apparmor.security.beta.kubernetes.io/allowedProfileNames: 'runtime/default'
+        seccomp.security.alpha.kubernetes.io/defaultProfileName: 'runtime/default'
+        apparmor.security.beta.kubernetes.io/defaultProfileName: 'runtime/default'
+    spec:
+      privileged: false
+      allowPrivilegeEscalation: false
+      requiredDropCapabilities:
+        - ALL
+      volumes:
+        - 'configMap'
+        - 'emptyDir'
+        - 'projected'
+        - 'secret'
+        - 'downwardAPI'
+        - 'persistentVolumeClaim'
+      runAsUser:
+        rule: 'MustRunAsNonRoot'
+      runAsGroup:
+        rule: 'MustRunAs'
+        ranges:
+          - min: 1
+            max: 65535
+      seLinux:
+        rule: 'RunAsAny'
+      supplementalGroups:
+        rule: 'MustRunAs'
+        ranges:
+          - min: 1
+            max: 65535
+      fsGroup:
+        rule: 'MustRunAs'
+        ranges:
+          - min: 1
+            max: 65535
+      readOnlyRootFilesystem: true
+      forbiddenSysctls:
+        - '*'
+
+---
+# OPA Gatekeeper Security Constraints
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: mlopsencryptedstorage
+spec:
+  crd:
+    spec:
+      names:
+        kind: MLOpsEncryptedStorage
+      validation:
+        type: object
+        properties:
+          encryptionRequired:
+            type: boolean
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package mlopsencryptedstorage
+        
+        violation[{"msg": msg}] {
+          input.review.object.kind == "PersistentVolumeClaim"
+          not input.review.object.metadata.annotations["volume.kubernetes.io/storage-class"]
+          msg := "PersistentVolumeClaim must specify an encrypted storage class"
+        }
+        
+        violation[{"msg": msg}] {
+          input.review.object.kind == "PersistentVolumeClaim"
+          storageClass := input.review.object.metadata.annotations["volume.kubernetes.io/storage-class"]
+          not contains(storageClass, "encrypted")
+          msg := sprintf("Storage class <%v> must be encrypted", [storageClass])
+        }
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: MLOpsEncryptedStorage
+metadata:
+  name: require-encrypted-storage
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["PersistentVolumeClaim"]
+    namespaces:
+      - mlops-clinical-trials
+      - mlops-clinical-trials-dev
+      - mlops-clinical-trials-staging
+  parameters:
+    encryptionRequired: true
+
+---
+# Container Image Security Policy
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: mlopsallowedregistries
+spec:
+  crd:
+    spec:
+      names:
+        kind: MLOpsAllowedRegistries
+      validation:
+        type: object
+        properties:
+          registries:
+            type: array
+            items:
+              type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package mlopsallowedregistries
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          image := container.image
+          not starts_with_allowed_registry(image)
+          msg := sprintf("Container image <%v> not from allowed registry", [image])
+        }
+        
+        starts_with_allowed_registry(image) {
+          registry := input.parameters.registries[_]
+          startswith(image, registry)
+        }
+
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: MLOpsAllowedRegistries
+metadata:
+  name: allowed-registries
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "DaemonSet", "StatefulSet"]
+    namespaces:
+      - mlops-clinical-trials
+      - mlops-clinical-trials-dev
+      - mlops-clinical-trials-staging
+  parameters:
+    registries:
+      - "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/"
+      - "${AZURE_REGISTRY_NAME}.azurecr.io/"
+      - "gcr.io/${GCP_PROJECT_ID}/"
+      - "ghcr.io/ruslanbaba/"
+
+---
+# Secrets Management with External Secrets Operator
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: aws-secrets-store
+  namespace: mlops-clinical-trials
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: ${AWS_REGION}
+      auth:
+        secretRef:
+          accessKeyID:
+            name: aws-secret
+            key: access-key-id
+          secretAccessKey:
+            name: aws-secret
+            key: secret-access-key
+
+---
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: azure-secrets-store
+  namespace: mlops-clinical-trials
+spec:
+  provider:
+    azurekv:
+      vaultUrl: "https://${AZURE_KEYVAULT_NAME}.vault.azure.net/"
+      authType: WorkloadIdentity
+      serviceAccountRef:
+        name: workload-identity-sa
+
+---
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: gcp-secrets-store
+  namespace: mlops-clinical-trials
+spec:
+  provider:
+    gcpsm:
+      projectID: ${GCP_PROJECT_ID}
+      auth:
+        workloadIdentity:
+          clusterLocation: ${GCP_CLUSTER_LOCATION}
+          clusterName: ${GCP_CLUSTER_NAME}
+          serviceAccountRef:
+            name: workload-identity-sa
+
+---
+# Multi-Cloud Secret Synchronization
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: mlops-database-credentials
+  namespace: mlops-clinical-trials
+spec:
+  refreshInterval: 300s
+  secretStoreRef:
+    name: aws-secrets-store
+    kind: SecretStore
+  target:
+    name: database-credentials
+    creationPolicy: Owner
+  data:
+  - secretKey: username
+    remoteRef:
+      key: mlops/clinical-trials/database
+      property: username
+  - secretKey: password
+    remoteRef:
+      key: mlops/clinical-trials/database
+      property: password
+  - secretKey: connection-string
+    remoteRef:
+      key: mlops/clinical-trials/database
+      property: connection-string
+
+---
+# Falco Advanced Security Rules
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-advanced-rules
+  namespace: security-hardening
+data:
+  mlops_advanced_security.yaml: |
+    - rule: Sensitive Data Access Outside Business Hours
+      desc: Detect access to sensitive ML data outside business hours
+      condition: >
+        open_read and container and
+        fd.filename glob "*/data/clinical_trials*.csv" and
+        not time_range("09:00:00", "17:00:00") and
+        not proc.name in (backup_agent, scheduled_job)
+      output: >
+        Sensitive data access outside business hours
+        (user=%user.name time=%evt.time command=%proc.cmdline file=%fd.name container=%container.name)
+      priority: WARNING
+      tags: [mlops, data-governance, compliance]
+    
+    - rule: Cryptocurrency Mining Detection
+      desc: Detect potential cryptocurrency mining activity
+      condition: >
+        spawned_process and container and
+        (proc.name in (xmrig, cpuminer, cgminer, bfgminer, ethminer) or
+         proc.cmdline contains "stratum+tcp" or
+         proc.cmdline contains "mining.pool" or
+         proc.cmdline contains "--coin" or
+         proc.cmdline contains "--algo")
+      output: >
+        Potential cryptocurrency mining detected
+        (user=%user.name command=%proc.cmdline container=%container.name k8s.pod=%k8s.pod.name)
+      priority: CRITICAL
+      tags: [security, cryptocurrency, malware]
+    
+    - rule: Unauthorized Root Access in ML Container
+      desc: Detect unauthorized root access attempts in ML containers
+      condition: >
+        container and
+        k8s.ns.name in (mlops-clinical-trials, mlops-clinical-trials-dev, mlops-clinical-trials-staging) and
+        user.uid = 0 and
+        not k8s.pod.name startswith "init-" and
+        not proc.name in (runc, containerd-shim, systemd)
+      output: >
+        Unauthorized root access in ML container
+        (user=%user.name command=%proc.cmdline container=%container.name k8s.pod=%k8s.pod.name)
+      priority: CRITICAL
+      tags: [mlops, security, privilege-escalation]
+    
+    - rule: Model File Tampering
+      desc: Detect unauthorized modification of ML model files
+      condition: >
+        open_write and container and
+        fd.filename glob "*/models/*.pkl" and
+        not proc.name in (model_trainer, model_validator, mlflow) and
+        not user.name in (mlflow, model-service)
+      output: >
+        Unauthorized model file modification
+        (user=%user.name command=%proc.cmdline file=%fd.name container=%container.name k8s.pod=%k8s.pod.name)
+      priority: CRITICAL
+      tags: [mlops, model-security, integrity]
+    
+    - rule: Suspicious Outbound Connections
+      desc: Detect suspicious outbound network connections
+      condition: >
+        outbound and container and
+        k8s.ns.name in (mlops-clinical-trials, mlops-clinical-trials-dev, mlops-clinical-trials-staging) and
+        not fd.net.dip in (cluster_ips, cloud_metadata_ips) and
+        (fd.net.dport in (22, 23, 1433, 3389, 5432, 6379, 27017) or
+         fd.net.dip contains "tor" or
+         fd.net.dip contains "onion")
+      output: >
+        Suspicious outbound connection
+        (user=%user.name command=%proc.cmdline connection=%fd.net.cip:%fd.net.cport->%fd.net.sip:%fd.net.sport container=%container.name k8s.pod=%k8s.pod.name)
+      priority: WARNING
+      tags: [mlops, network-security, data-exfiltration]
+
+---
+# Cloud-specific Security Configurations
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloud-security-configs
+  namespace: security-hardening
+data:
+  aws-security-config.yaml: |
+    # AWS Security Group Rules
+    SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        SourceSecurityGroupId: ${ALB_SECURITY_GROUP_ID}
+      - IpProtocol: tcp
+        FromPort: 8080
+        ToPort: 8080
+        SourceSecurityGroupId: ${EKS_NODE_GROUP_SECURITY_GROUP_ID}
+    
+    SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0  # HTTPS to AWS services
+      - IpProtocol: tcp
+        FromPort: 5432
+        ToPort: 5432
+        DestinationSecurityGroupId: ${RDS_SECURITY_GROUP_ID}
+    
+    # AWS WAF Rules
+    WAFWebACL:
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 2
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+        - Name: RateLimitRule
+          Priority: 3
+          Statement:
+            RateBasedStatement:
+              Limit: 1000
+              AggregateKeyType: IP
+
+  azure-security-config.yaml: |
+    # Azure Network Security Group
+    SecurityRules:
+      - name: Allow-HTTPS-Inbound
+        properties:
+          priority: 100
+          direction: Inbound
+          access: Allow
+          protocol: Tcp
+          sourcePortRange: "*"
+          destinationPortRange: "443"
+          sourceAddressPrefix: "*"
+          destinationAddressPrefix: "*"
+      - name: Allow-Internal-Communication
+        properties:
+          priority: 200
+          direction: Inbound
+          access: Allow
+          protocol: "*"
+          sourcePortRange: "*"
+          destinationPortRange: "*"
+          sourceAddressPrefix: VirtualNetwork
+          destinationAddressPrefix: VirtualNetwork
+      - name: Deny-All-Other-Inbound
+        properties:
+          priority: 4096
+          direction: Inbound
+          access: Deny
+          protocol: "*"
+          sourcePortRange: "*"
+          destinationPortRange: "*"
+          sourceAddressPrefix: "*"
+          destinationAddressPrefix: "*"
+    
+    # Azure Application Gateway WAF
+    WebApplicationFirewallConfiguration:
+      enabled: true
+      firewallMode: Prevention
+      ruleSetType: OWASP
+      ruleSetVersion: "3.2"
+      requestBodyCheck: true
+      maxRequestBodySizeInKb: 128
+
+  gcp-security-config.yaml: |
+    # GCP Firewall Rules
+    FirewallRules:
+      - name: allow-https-ingress
+        direction: INGRESS
+        priority: 1000
+        sourceRanges: ["0.0.0.0/0"]
+        allowed:
+          - IPProtocol: tcp
+            ports: ["443"]
+        targetTags: ["mlops-clinical-trials"]
+      
+      - name: allow-internal-communication
+        direction: INGRESS
+        priority: 1100
+        sourceRanges: ["10.0.0.0/8"]
+        allowed:
+          - IPProtocol: tcp
+          - IPProtocol: udp
+        targetTags: ["mlops-clinical-trials"]
+      
+      - name: deny-all-other-ingress
+        direction: INGRESS
+        priority: 65534
+        sourceRanges: ["0.0.0.0/0"]
+        denied:
+          - IPProtocol: all
+        targetTags: ["mlops-clinical-trials"]
+    
+    # GCP Cloud Armor Security Policy
+    SecurityPolicy:
+      rules:
+        - priority: 1000
+          match:
+            versionedExpr: SRC_IPS_V1
+            config:
+              srcIpRanges: ["*"]
+          action: allow
+          rateLimitOptions:
+            conformAction: allow
+            exceedAction: deny_429
+            rateLimitThreshold:
+              count: 100
+              intervalSec: 60

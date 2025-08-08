@@ -1,0 +1,676 @@
+# Resilient Traffic Surge Handler with Auto-scaling Configuration
+# KEDA, HPA, VPA, and Cluster Autoscaler configurations for handling traffic surges
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: autoscaling
+  labels:
+    app: mlops-clinical-trials
+    component: autoscaling
+
+---
+# KEDA ScaledObject for Event-Driven Auto-scaling
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: clinical-trials-api-scaler
+  namespace: mlops-clinical-trials
+spec:
+  scaleTargetRef:
+    name: clinical-trials-api
+  pollingInterval: 15  # Check metrics every 15 seconds
+  cooldownPeriod: 60   # Wait 60 seconds before scaling down
+  idleReplicaCount: 0  # Scale to 0 when no traffic (cost optimization)
+  minReplicaCount: 2   # Minimum replicas for availability
+  maxReplicaCount: 100 # Maximum replicas for traffic surge
+  
+  triggers:
+  # HTTP Request Rate Scaling
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.multi-cloud-monitoring.svc.cluster.local:9090
+      metricName: http_requests_per_second
+      threshold: '50'
+      query: |
+        sum(rate(istio_requests_total{
+          destination_service_name="clinical-trials-api",
+          destination_service_namespace="mlops-clinical-trials"
+        }[1m]))
+  
+  # CPU Utilization Scaling
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.multi-cloud-monitoring.svc.cluster.local:9090
+      metricName: cpu_utilization_percentage
+      threshold: '70'
+      query: |
+        avg(rate(container_cpu_usage_seconds_total{
+          pod=~"clinical-trials-api-.*",
+          namespace="mlops-clinical-trials"
+        }[1m])) * 100
+  
+  # Memory Utilization Scaling
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.multi-cloud-monitoring.svc.cluster.local:9090
+      metricName: memory_utilization_percentage
+      threshold: '80'
+      query: |
+        avg(container_memory_usage_bytes{
+          pod=~"clinical-trials-api-.*",
+          namespace="mlops-clinical-trials"
+        } / container_spec_memory_limit_bytes) * 100
+  
+  # Queue Length Scaling (for async processing)
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.multi-cloud-monitoring.svc.cluster.local:9090
+      metricName: queue_length
+      threshold: '10'
+      query: |
+        sum(redis_queue_length{
+          queue_name="model_prediction_queue",
+          namespace="mlops-clinical-trials"
+        })
+  
+  # Response Time Scaling
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.multi-cloud-monitoring.svc.cluster.local:9090
+      metricName: response_time_p95
+      threshold: '2000'  # 2 seconds
+      query: |
+        histogram_quantile(0.95,
+          sum(rate(istio_request_duration_milliseconds_bucket{
+            destination_service_name="clinical-trials-api"
+          }[2m])) by (le)
+        )
+
+---
+# KEDA ScaledObject for ML Training Jobs
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ml-training-scaler
+  namespace: mlops-clinical-trials
+spec:
+  scaleTargetRef:
+    name: ml-training-workers
+  pollingInterval: 30
+  cooldownPeriod: 300  # 5 minutes cooldown for training jobs
+  minReplicaCount: 0
+  maxReplicaCount: 50
+  
+  triggers:
+  # Redis Queue Length for Training Jobs
+  - type: redis
+    metadata:
+      address: redis.data-storage.svc.cluster.local:6379
+      listName: training_jobs_queue
+      listLength: '5'
+      databaseIndex: '0'
+      password: redis-password
+  
+  # SQS Queue for AWS
+  - type: aws-sqs-queue
+    metadata:
+      queueURL: https://sqs.${AWS_REGION}.amazonaws.com/${AWS_ACCOUNT_ID}/ml-training-queue
+      queueLength: '10'
+      awsRegion: ${AWS_REGION}
+    authenticationRef:
+      name: aws-sqs-auth
+  
+  # Azure Service Bus Queue
+  - type: azure-servicebus
+    metadata:
+      queueName: ml-training-queue
+      messageCount: '10'
+    authenticationRef:
+      name: azure-servicebus-auth
+
+---
+# Horizontal Pod Autoscaler with Custom Metrics
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: clinical-trials-model-server-hpa
+  namespace: mlops-clinical-trials
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: clinical-trials-model-server
+  minReplicas: 3
+  maxReplicas: 200
+  
+  metrics:
+  # CPU Utilization
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  
+  # Memory Utilization
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  
+  # Custom Metric: Requests per Second
+  - type: Pods
+    pods:
+      metric:
+        name: requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "30"
+  
+  # Custom Metric: Model Inference Latency
+  - type: Object
+    object:
+      metric:
+        name: model_inference_latency_p95
+      target:
+        type: Value
+        value: "1500"  # 1.5 seconds
+      describedObject:
+        apiVersion: v1
+        kind: Service
+        name: clinical-trials-model-server
+  
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60   # Scale up quickly for traffic surges
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 10
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Scale down slowly
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+
+---
+# Vertical Pod Autoscaler for Resource Optimization
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: clinical-trials-api-vpa
+  namespace: mlops-clinical-trials
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: clinical-trials-api
+  updatePolicy:
+    updateMode: "Auto"  # Automatically update resources
+  resourcePolicy:
+    containerPolicies:
+    - containerName: api
+      maxAllowed:
+        cpu: "4"
+        memory: "8Gi"
+      minAllowed:
+        cpu: "100m"
+        memory: "128Mi"
+      controlledResources: ["cpu", "memory"]
+      controlledValues: RequestsAndLimits
+
+---
+# Vertical Pod Autoscaler for Model Server
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: clinical-trials-model-server-vpa
+  namespace: mlops-clinical-trials
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: clinical-trials-model-server
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: model-server
+      maxAllowed:
+        cpu: "8"
+        memory: "16Gi"
+      minAllowed:
+        cpu: "500m"
+        memory: "1Gi"
+      controlledResources: ["cpu", "memory"]
+      controlledValues: RequestsAndLimits
+
+---
+# Cluster Autoscaler Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-autoscaler-config
+  namespace: kube-system
+data:
+  # AWS EKS Cluster Autoscaler
+  aws-cluster-autoscaler.yaml: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: cluster-autoscaler
+      namespace: kube-system
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: cluster-autoscaler
+      template:
+        metadata:
+          labels:
+            app: cluster-autoscaler
+        spec:
+          serviceAccountName: cluster-autoscaler
+          containers:
+          - image: k8s.gcr.io/autoscaling/cluster-autoscaler:v1.25.0
+            name: cluster-autoscaler
+            resources:
+              limits:
+                cpu: 100m
+                memory: 600Mi
+              requests:
+                cpu: 100m
+                memory: 600Mi
+            command:
+            - ./cluster-autoscaler
+            - --v=4
+            - --stderrthreshold=info
+            - --cloud-provider=aws
+            - --skip-nodes-with-local-storage=false
+            - --expander=least-waste
+            - --node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/mlops-clinical-trials
+            - --balance-similar-node-groups
+            - --skip-nodes-with-system-pods=false
+            - --scale-down-enabled=true
+            - --scale-down-delay-after-add=10m
+            - --scale-down-unneeded-time=10m
+            - --scale-down-utilization-threshold=0.5
+            - --max-node-provision-time=15m
+            env:
+            - name: AWS_REGION
+              value: ${AWS_REGION}
+  
+  # Azure AKS Cluster Autoscaler
+  azure-cluster-autoscaler.yaml: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: cluster-autoscaler
+      namespace: kube-system
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: cluster-autoscaler
+      template:
+        metadata:
+          labels:
+            app: cluster-autoscaler
+        spec:
+          serviceAccountName: cluster-autoscaler
+          containers:
+          - image: mcr.microsoft.com/oss/kubernetes/autoscaler/cluster-autoscaler:v1.25.0
+            name: cluster-autoscaler
+            resources:
+              limits:
+                cpu: 100m
+                memory: 600Mi
+              requests:
+                cpu: 100m
+                memory: 600Mi
+            command:
+            - ./cluster-autoscaler
+            - --v=4
+            - --stderrthreshold=info
+            - --cloud-provider=azure
+            - --skip-nodes-with-local-storage=false
+            - --expander=least-waste
+            - --skip-nodes-with-system-pods=false
+            - --scale-down-enabled=true
+            - --scale-down-delay-after-add=10m
+            - --scale-down-unneeded-time=10m
+            - --scale-down-utilization-threshold=0.5
+            env:
+            - name: ARM_SUBSCRIPTION_ID
+              value: ${AZURE_SUBSCRIPTION_ID}
+            - name: ARM_RESOURCE_GROUP
+              value: ${AZURE_RESOURCE_GROUP}
+            - name: ARM_VM_TYPE
+              value: "standard"
+  
+  # GCP GKE Cluster Autoscaler
+  gcp-cluster-autoscaler.yaml: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: cluster-autoscaler
+      namespace: kube-system
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: cluster-autoscaler
+      template:
+        metadata:
+          labels:
+            app: cluster-autoscaler
+        spec:
+          serviceAccountName: cluster-autoscaler
+          containers:
+          - image: k8s.gcr.io/autoscaling/cluster-autoscaler:v1.25.0
+            name: cluster-autoscaler
+            resources:
+              limits:
+                cpu: 100m
+                memory: 600Mi
+              requests:
+                cpu: 100m
+                memory: 600Mi
+            command:
+            - ./cluster-autoscaler
+            - --v=4
+            - --stderrthreshold=info
+            - --cloud-provider=gce
+            - --skip-nodes-with-local-storage=false
+            - --expander=least-waste
+            - --skip-nodes-with-system-pods=false
+            - --scale-down-enabled=true
+            - --scale-down-delay-after-add=10m
+            - --scale-down-unneeded-time=10m
+            - --scale-down-utilization-threshold=0.5
+            env:
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/secrets/google/key.json
+
+---
+# Pod Disruption Budget for High Availability
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: clinical-trials-api-pdb
+  namespace: mlops-clinical-trials
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: clinical-trials-api
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: clinical-trials-model-server-pdb
+  namespace: mlops-clinical-trials
+spec:
+  minAvailable: 50%
+  selector:
+    matchLabels:
+      app: clinical-trials-model-server
+
+---
+# Node Affinity and Anti-Affinity Rules
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: affinity-rules
+  namespace: mlops-clinical-trials
+data:
+  deployment-affinity.yaml: |
+    # API Deployment with Anti-Affinity
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: clinical-trials-api
+    spec:
+      template:
+        spec:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  labelSelector:
+                    matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                      - clinical-trials-api
+                  topologyKey: kubernetes.io/hostname
+            nodeAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                preference:
+                  matchExpressions:
+                  - key: node-type
+                    operator: In
+                    values:
+                    - compute-optimized
+              - weight: 50
+                preference:
+                  matchExpressions:
+                  - key: availability-zone
+                    operator: In
+                    values:
+                    - zone-a
+                    - zone-b
+                    - zone-c
+    
+    # Model Server Deployment with GPU Affinity
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: clinical-trials-model-server
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: accelerator
+                    operator: In
+                    values:
+                    - nvidia-tesla-v100
+                    - nvidia-tesla-t4
+                    - nvidia-a100
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                preference:
+                  matchExpressions:
+                  - key: instance-type
+                    operator: In
+                    values:
+                    - ml-optimized
+          tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+
+---
+# Resource Quotas for Traffic Surge Management
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: compute-quota
+  namespace: mlops-clinical-trials
+spec:
+  hard:
+    requests.cpu: "100"        # Allow up to 100 CPU cores
+    requests.memory: "200Gi"   # Allow up to 200GB memory
+    limits.cpu: "200"          # CPU limit ceiling
+    limits.memory: "400Gi"     # Memory limit ceiling
+    requests.nvidia.com/gpu: "20"  # Allow up to 20 GPUs
+    count/deployments.apps: "50"    # Maximum deployments
+    count/services: "50"            # Maximum services
+    count/persistentvolumeclaims: "20"  # Maximum PVCs
+
+---
+# Limit Ranges for Resource Boundaries
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: pod-limit-range
+  namespace: mlops-clinical-trials
+spec:
+  limits:
+  - default:
+      cpu: "1"
+      memory: "2Gi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    max:
+      cpu: "8"
+      memory: "16Gi"
+    min:
+      cpu: "10m"
+      memory: "64Mi"
+    type: Container
+  - max:
+      cpu: "16"
+      memory: "32Gi"
+    type: Pod
+  - max:
+      storage: "100Gi"
+    type: PersistentVolumeClaim
+
+---
+# Custom Metrics Server for Advanced Scaling
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-metrics-config
+  namespace: autoscaling
+data:
+  prometheus-adapter.yaml: |
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: adapter-config
+      namespace: custom-metrics
+    data:
+      config.yaml: |
+        rules:
+        # HTTP requests per second
+        - seriesQuery: 'istio_requests_total{destination_service_name!="",destination_service_namespace!=""}'
+          resources:
+            overrides:
+              destination_service_namespace:
+                resource: namespace
+              destination_service_name:
+                resource: service
+          name:
+            matches: "^istio_requests_total"
+            as: "requests_per_second"
+          metricsQuery: 'sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>)'
+        
+        # Model prediction latency
+        - seriesQuery: 'model_prediction_duration_seconds{service!=""}'
+          resources:
+            overrides:
+              service:
+                resource: service
+          name:
+            matches: "^model_prediction_duration_seconds"
+            as: "model_inference_latency_p95"
+          metricsQuery: 'histogram_quantile(0.95, sum(rate(<<.Series>>_bucket{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>, le))'
+        
+        # Queue depth
+        - seriesQuery: 'redis_queue_length{queue_name!=""}'
+          resources:
+            overrides:
+              queue_name:
+                resource: service
+          name:
+            matches: "^redis_queue_length"
+            as: "queue_depth"
+          metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+
+---
+# Traffic Surge Detection and Alerting
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: traffic-surge-alerts
+  namespace: multi-cloud-monitoring
+spec:
+  groups:
+  - name: traffic-surge-detection
+    rules:
+    - alert: TrafficSurgeDetected
+      expr: |
+        (
+          rate(istio_requests_total{destination_service_name="clinical-trials-api"}[1m]) > 
+          (
+            avg_over_time(rate(istio_requests_total{destination_service_name="clinical-trials-api"}[1m])[30m:1m]) * 3
+          )
+        ) and (
+          rate(istio_requests_total{destination_service_name="clinical-trials-api"}[1m]) > 100
+        )
+      for: 2m
+      labels:
+        severity: warning
+        component: traffic-management
+      annotations:
+        summary: "Traffic surge detected on clinical trials API"
+        description: "Request rate is {{ $value }} req/sec, which is 3x higher than the 30-minute average"
+        runbook_url: "https://docs.mlops.com/runbooks/traffic-surge"
+    
+    - alert: AutoScalingLagDetected
+      expr: |
+        (
+          rate(istio_requests_total[1m]) > 
+          (kube_deployment_status_replicas{deployment="clinical-trials-api"} * 30)
+        ) and (
+          rate(istio_request_duration_milliseconds_sum[1m]) / rate(istio_request_duration_milliseconds_count[1m]) > 2000
+        )
+      for: 5m
+      labels:
+        severity: critical
+        component: autoscaling
+      annotations:
+        summary: "Auto-scaling cannot keep up with traffic surge"
+        description: "Response time is {{ $value }}ms and scaling is lagging behind demand"
+    
+    - alert: ResourceExhaustionRisk
+      expr: |
+        (
+          sum(kube_pod_container_resource_requests{resource="cpu"}) / 
+          sum(kube_node_status_allocatable{resource="cpu"})
+        ) > 0.9
+      for: 3m
+      labels:
+        severity: critical
+        component: capacity-planning
+      annotations:
+        summary: "Cluster CPU capacity nearly exhausted"
+        description: "CPU utilization is {{ $value | humanizePercentage }}, consider adding more nodes"
+    
+    - alert: ModelInferenceBacklog
+      expr: |
+        sum(redis_queue_length{queue_name="model_prediction_queue"}) > 1000
+      for: 5m
+      labels:
+        severity: warning
+        component: model-serving
+      annotations:
+        summary: "Model inference queue backlog detected"
+        description: "Queue has {{ $value }} pending predictions, scaling model servers"
