@@ -1,0 +1,220 @@
+# Breast Cancer Risk Assessment Model Configuration
+
+model_config:
+  name: "breast_cancer_risk_assessment"
+  version: "v1.0.0"
+  description: "XGBoost model for breast cancer risk assessment"
+  type: "xgboost"
+  
+  # Model hyperparameters
+  hyperparameters:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.1
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    scale_pos_weight: 1.0
+    random_state: 42
+
+# Data configuration
+data_config:
+  source_path: "data/raw/breast_cancer.csv"
+  target_column: "malignant"
+  
+  # Feature configuration
+  features:
+    numeric:
+      - age
+      - tumor_size
+      - lymph_nodes_positive
+      - grade
+      - er_status
+      - pr_status
+      - her2_status
+      - ki67_percentage
+    categorical:
+      - histology_type
+      - stage
+      - menopause_status
+      - family_history
+    
+  # Data preprocessing
+  preprocessing:
+    handle_missing: "median"  # median, mean, mode, knn, drop
+    outlier_detection: "iqr"  # iqr, zscore, isolation_forest
+    scaling_method: "standard"  # standard, minmax, robust
+    encoding_method: "onehot"  # onehot, label, target
+    
+  # Data splitting
+  train_split: 0.6
+  validation_split: 0.2
+  test_split: 0.2
+  stratify: true
+  random_state: 42
+
+# Training configuration
+training_config:
+  # Cross-validation
+  cross_validation:
+    enabled: true
+    folds: 5
+    scoring: "f1_weighted"
+    
+  # Hyperparameter tuning
+  hyperparameter_tuning:
+    enabled: true
+    method: "optuna"  # optuna, grid_search, random_search
+    n_trials: 50
+    timeout_minutes: 30
+    
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 10
+    metric: "validation_f1"
+    
+  # Model selection criteria
+  selection_criteria:
+    primary_metric: "f1_score"
+    minimum_accuracy: 0.85
+    minimum_precision: 0.80
+    minimum_recall: 0.80
+
+# Validation configuration
+validation_config:
+  # Performance thresholds
+  thresholds:
+    min_accuracy: 0.85
+    min_precision: 0.80
+    min_recall: 0.80
+    min_f1_score: 0.80
+    max_bias_score: 0.1
+    
+  # Bias detection
+  bias_detection:
+    enabled: true
+    protected_attributes:
+      - age_group
+      - race
+      - income_level
+    fairness_metrics:
+      - demographic_parity
+      - equalized_odds
+      - equality_of_opportunity
+      
+  # Regulatory compliance
+  regulatory_compliance:
+    hipaa_compliance: true
+    gdpr_compliance: true
+    fda_validation: true
+    audit_trail: true
+
+# MLflow configuration
+mlflow_config:
+  experiment_name: "breast_cancer_risk_assessment"
+  run_name_prefix: "breast_cancer"
+  tracking_uri: "sqlite:///mlflow.db"
+  artifact_location: "./mlruns"
+  
+  # Logging configuration
+  log_model: true
+  log_artifacts: true
+  log_metrics: true
+  log_params: true
+  
+  # Model registry
+  register_model: true
+  model_name: "BreastCancerRiskModel"
+  stage: "Staging"
+
+# Deployment configuration
+deployment_config:
+  # Model serving
+  serving:
+    api_version: "v1"
+    max_batch_size: 100
+    timeout_seconds: 30
+    scaling:
+      min_replicas: 2
+      max_replicas: 10
+      target_cpu_utilization: 70
+      
+  # A/B testing
+  ab_testing:
+    enabled: true
+    traffic_split: 0.1
+    duration_hours: 24
+    min_samples: 1000
+    success_metrics:
+      - accuracy
+      - response_time
+      - error_rate
+      
+  # Monitoring
+  monitoring:
+    data_drift_detection: true
+    model_performance_monitoring: true
+    alert_thresholds:
+      accuracy_drop: 0.05
+      error_rate_increase: 0.02
+      response_time_increase: 100  # milliseconds
+
+# Feature store configuration
+feature_store_config:
+  enabled: true
+  store_type: "feast"
+  online_store: "redis"
+  offline_store: "parquet"
+  
+  # Feature definitions
+  feature_groups:
+    patient_demographics:
+      features:
+        - age
+        - race
+        - income_level
+        - education_level
+      ttl_days: 365
+      
+    clinical_data:
+      features:
+        - tumor_size
+        - lymph_nodes_positive
+        - grade
+        - stage
+      ttl_days: 30
+      
+    biomarkers:
+      features:
+        - er_status
+        - pr_status
+        - her2_status
+        - ki67_percentage
+      ttl_days: 90
+
+# Security configuration
+security_config:
+  encryption:
+    enabled: true
+    algorithm: "AES-256"
+    key_rotation_days: 90
+    
+  access_control:
+    authentication_required: true
+    authorization_method: "rbac"
+    allowed_roles:
+      - data_scientist
+      - clinician
+      - administrator
+      
+  audit_logging:
+    enabled: true
+    log_level: "INFO"
+    retention_days: 90
+    
+  data_privacy:
+    anonymization: true
+    pseudonymization: true
+    consent_tracking: true

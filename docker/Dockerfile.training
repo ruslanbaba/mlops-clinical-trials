@@ -1,0 +1,97 @@
+# Multi-stage Dockerfile for model training environment
+FROM python:3.9-slim as base
+
+# Set environment variables
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user
+RUN useradd --create-home --shell /bin/bash app
+
+# Set work directory
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt requirements-dev.txt ./
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Training stage
+FROM base as training
+
+# Install additional training dependencies
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+# Copy source code
+COPY src/ ./src/
+COPY configs/ ./configs/
+COPY scripts/ ./scripts/
+
+# Create necessary directories
+RUN mkdir -p data models logs
+
+# Change ownership to app user
+RUN chown -R app:app /app
+
+# Switch to app user
+USER app
+
+# Set entrypoint
+ENTRYPOINT ["python", "-m", "src.training.trainer"]
+
+# Development stage
+FROM training as development
+
+USER root
+
+# Install development tools
+RUN pip install --no-cache-dir \
+    jupyter \
+    jupyterlab \
+    ipython
+
+# Install VS Code server for remote development
+RUN curl -fsSL https://code-server.dev/install.sh | sh
+
+USER app
+
+# Expose ports
+EXPOSE 8888 8080
+
+# Start Jupyter Lab by default in development
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
+
+# Production training stage
+FROM base as production
+
+# Copy only necessary files
+COPY src/ ./src/
+COPY configs/ ./configs/
+
+# Create directories
+RUN mkdir -p data models logs
+
+# Change ownership
+RUN chown -R app:app /app
+
+# Switch to app user
+USER app
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import src; print('Training environment healthy')" || exit 1
+
+# Set entrypoint
+ENTRYPOINT ["python", "-m", "src.training.trainer"]

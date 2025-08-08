@@ -1,0 +1,316 @@
+# Data Pipeline Configuration
+
+pipeline_config:
+  name: "clinical_trials_data_pipeline"
+  version: "v1.0.0"
+  description: "Comprehensive data pipeline for clinical trial analytics"
+
+# Data sources configuration
+data_sources:
+  primary:
+    type: "database"
+    connection:
+      host: "clinical-db.internal"
+      port: 5432
+      database: "clinical_trials"
+      schema: "production"
+    tables:
+      - name: "patient_data"
+        primary_key: "patient_id"
+        updated_column: "last_modified"
+      - name: "clinical_trials"
+        primary_key: "trial_id"
+        updated_column: "last_updated"
+      - name: "outcomes"
+        primary_key: "outcome_id"
+        updated_column: "recorded_at"
+        
+  secondary:
+    type: "s3"
+    bucket: "clinical-trials-data"
+    prefix: "raw-data/"
+    file_formats: ["csv", "parquet", "json"]
+    
+  external:
+    type: "api"
+    endpoints:
+      - name: "genomic_data"
+        url: "https://api.genomics.external.com/v1/data"
+        auth_type: "bearer_token"
+        rate_limit: 100  # requests per minute
+      - name: "imaging_data"
+        url: "https://api.imaging.external.com/v2/scans"
+        auth_type: "api_key"
+        rate_limit: 50
+
+# Data quality configuration
+data_quality:
+  validation_rules:
+    # Patient data validation
+    patient_data:
+      age:
+        type: "numeric"
+        min_value: 18
+        max_value: 120
+        required: true
+      patient_id:
+        type: "string"
+        pattern: "^PAT-[0-9]{8}$"
+        required: true
+        unique: true
+      gender:
+        type: "categorical"
+        allowed_values: ["M", "F", "Other"]
+        required: true
+        
+    # Clinical measurements validation
+    clinical_measurements:
+      tumor_size:
+        type: "numeric"
+        min_value: 0.1
+        max_value: 50.0
+        unit: "cm"
+      psa_level:
+        type: "numeric"
+        min_value: 0
+        max_value: 1000
+        unit: "ng/mL"
+        
+  # Data completeness thresholds
+  completeness_thresholds:
+    critical_fields: 0.95  # 95% completeness required
+    important_fields: 0.85  # 85% completeness required
+    optional_fields: 0.50   # 50% completeness acceptable
+    
+  # Outlier detection
+  outlier_detection:
+    method: "isolation_forest"
+    contamination: 0.05
+    exclude_columns: ["patient_id", "trial_id"]
+
+# Data transformation configuration
+transformations:
+  # Feature engineering
+  feature_engineering:
+    age_groups:
+      type: "binning"
+      source_column: "age"
+      bins: [18, 40, 50, 60, 70, 120]
+      labels: ["18-40", "40-50", "50-60", "60-70", "70+"]
+      
+    bmi_categories:
+      type: "conditional"
+      source_columns: ["weight", "height"]
+      conditions:
+        - condition: "bmi < 18.5"
+          value: "Underweight"
+        - condition: "18.5 <= bmi < 25"
+          value: "Normal"
+        - condition: "25 <= bmi < 30"
+          value: "Overweight"
+        - condition: "bmi >= 30"
+          value: "Obese"
+          
+    treatment_response:
+      type: "derived"
+      formula: "post_treatment_size / pre_treatment_size"
+      new_column: "response_ratio"
+      
+  # Data normalization
+  normalization:
+    numeric_features:
+      method: "z_score"
+      columns: ["age", "tumor_size", "biomarker_levels"]
+      
+    categorical_features:
+      method: "one_hot_encoding"
+      columns: ["cancer_type", "treatment_type", "hospital"]
+      
+  # Data aggregation
+  aggregation:
+    patient_level:
+      group_by: "patient_id"
+      aggregations:
+        total_treatments: "count"
+        avg_response_time: "mean"
+        best_outcome: "max"
+        
+    trial_level:
+      group_by: "trial_id"
+      aggregations:
+        enrollment_count: "count"
+        success_rate: "mean"
+        completion_rate: "mean"
+
+# Data pipeline stages
+pipeline_stages:
+  - name: "extract"
+    type: "extraction"
+    parallel: true
+    retry_count: 3
+    timeout_minutes: 30
+    
+  - name: "validate"
+    type: "validation"
+    depends_on: ["extract"]
+    validation_rules: "data_quality"
+    stop_on_failure: true
+    
+  - name: "clean"
+    type: "cleaning"
+    depends_on: ["validate"]
+    operations:
+      - remove_duplicates
+      - handle_missing_values
+      - remove_outliers
+      
+  - name: "transform"
+    type: "transformation"
+    depends_on: ["clean"]
+    transformations: "transformations"
+    
+  - name: "feature_engineering"
+    type: "feature_engineering"
+    depends_on: ["transform"]
+    feature_config: "feature_engineering"
+    
+  - name: "split"
+    type: "data_splitting"
+    depends_on: ["feature_engineering"]
+    split_strategy: "stratified"
+    ratios:
+      train: 0.6
+      validation: 0.2
+      test: 0.2
+      
+  - name: "load"
+    type: "loading"
+    depends_on: ["split"]
+    destinations:
+      - feature_store
+      - model_training_storage
+      - data_warehouse
+
+# Scheduling configuration
+scheduling:
+  # Batch processing schedule
+  batch_schedule:
+    frequency: "daily"
+    time: "02:00"
+    timezone: "UTC"
+    
+  # Real-time processing
+  streaming:
+    enabled: true
+    source: "kafka"
+    topic: "clinical_events"
+    batch_size: 1000
+    batch_timeout_seconds: 30
+    
+  # Incremental updates
+  incremental:
+    enabled: true
+    watermark_column: "last_modified"
+    lookback_hours: 24
+
+# Monitoring and alerting
+monitoring:
+  # Pipeline health metrics
+  health_metrics:
+    - pipeline_success_rate
+    - data_freshness
+    - data_quality_score
+    - processing_time
+    
+  # Data quality metrics
+  quality_metrics:
+    - completeness_percentage
+    - validity_percentage
+    - uniqueness_percentage
+    - consistency_score
+    
+  # Alerting rules
+  alerts:
+    pipeline_failure:
+      condition: "pipeline_success_rate < 0.95"
+      severity: "critical"
+      notification_channels: ["email", "slack"]
+      
+    data_quality_degradation:
+      condition: "data_quality_score < 0.85"
+      severity: "warning"
+      notification_channels: ["email"]
+      
+    data_freshness:
+      condition: "data_age > 6 hours"
+      severity: "warning"
+      notification_channels: ["slack"]
+
+# Output configuration
+outputs:
+  # Feature store
+  feature_store:
+    type: "feast"
+    online_store:
+      type: "redis"
+      connection_string: "redis://redis:6379"
+    offline_store:
+      type: "parquet"
+      path: "s3://feature-store/offline"
+      
+  # Data warehouse
+  data_warehouse:
+    type: "postgresql"
+    connection:
+      host: "data-warehouse.internal"
+      port: 5432
+      database: "analytics"
+      schema: "clinical_trials"
+      
+  # Model training storage
+  model_training_storage:
+    type: "s3"
+    bucket: "model-training-data"
+    prefix: "processed/"
+    format: "parquet"
+    partitioning: ["date", "cancer_type"]
+
+# Security and compliance
+security:
+  # Data encryption
+  encryption:
+    at_rest: true
+    in_transit: true
+    key_management: "aws_kms"
+    
+  # Access control
+  access_control:
+    authentication: "ldap"
+    authorization: "rbac"
+    audit_logging: true
+    
+  # Data privacy
+  privacy:
+    pii_detection: true
+    anonymization: true
+    consent_management: true
+    retention_policy: "7_years"
+
+# Performance optimization
+performance:
+  # Caching
+  caching:
+    enabled: true
+    cache_type: "redis"
+    ttl_hours: 24
+    
+  # Parallelization
+  parallelization:
+    max_workers: 8
+    chunk_size: 10000
+    
+  # Resource allocation
+  resources:
+    memory_limit: "8Gi"
+    cpu_limit: "4"
+    disk_space: "100Gi"

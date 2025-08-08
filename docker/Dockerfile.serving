@@ -1,0 +1,138 @@
+# Multi-stage Dockerfile for model serving
+FROM python:3.9-slim as base
+
+# Set environment variables
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user
+RUN useradd --create-home --shell /bin/bash app
+
+# Set work directory
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt ./
+
+# Install Python dependencies (minimal for serving)
+RUN pip install --no-cache-dir \
+    fastapi==0.101.1 \
+    uvicorn==0.23.2 \
+    pydantic==2.1.1 \
+    scikit-learn==1.3.0 \
+    xgboost==1.7.6 \
+    numpy==1.24.3 \
+    pandas==2.0.3 \
+    joblib==1.3.1 \
+    redis==4.6.0 \
+    prometheus-client==0.17.1 \
+    structlog==23.1.0
+
+# Copy source code (minimal for serving)
+COPY src/serving/ ./src/serving/
+COPY src/config.py ./src/
+COPY src/logger.py ./src/
+COPY src/__init__.py ./src/
+
+# Create directories
+RUN mkdir -p models logs
+
+# Copy model serving script
+COPY <<EOF ./main.py
+"""
+Model serving application entry point.
+"""
+import uvicorn
+from src.serving.api import ModelAPI
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "src.serving.api:app",
+        host="0.0.0.0",
+        port=8080,
+        workers=1,
+        log_level="info",
+        access_log=True
+    )
+EOF
+
+# Change ownership
+RUN chown -R app:app /app
+
+# Switch to app user
+USER app
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Production serving stage
+FROM base as production
+
+# Copy production configuration
+COPY configs/production.yaml ./configs/
+
+# Set production environment
+ENV ENVIRONMENT=production
+
+# Start the application
+CMD ["python", "main.py"]
+
+# Development serving stage
+FROM base as development
+
+# Install development dependencies
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-asyncio \
+    httpx
+
+# Copy development configuration
+COPY configs/development.yaml ./configs/
+
+# Set development environment
+ENV ENVIRONMENT=development
+ENV DEBUG=true
+
+# Start with reload for development
+CMD ["uvicorn", "src.serving.api:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+
+# Minimal production stage
+FROM python:3.9-alpine as minimal
+
+# Install minimal dependencies
+RUN apk add --no-cache \
+    libpq \
+    curl
+
+# Create app user
+RUN adduser -D -s /bin/sh app
+
+WORKDIR /app
+
+# Copy only the compiled application
+COPY --from=production /app /app
+
+# Switch to app user
+USER app
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Start the application
+CMD ["python", "main.py"]

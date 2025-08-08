@@ -1,0 +1,119 @@
+# FastAPI Dockerfile for model API
+FROM python:3.9-slim
+
+# Set environment variables
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user
+RUN useradd --create-home --shell /bin/bash app
+
+# Set work directory
+WORKDIR /app
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    fastapi==0.101.1 \
+    uvicorn[standard]==0.23.2 \
+    pydantic==2.1.1 \
+    sqlalchemy==2.0.19 \
+    psycopg2-binary==2.9.7 \
+    redis==4.6.0 \
+    prometheus-client==0.17.1 \
+    structlog==23.1.0 \
+    pyjwt==2.8.0 \
+    httpx==0.24.1
+
+# Copy API source code
+COPY src/serving/api.py ./src/serving/
+COPY src/config.py ./src/
+COPY src/logger.py ./src/
+COPY src/__init__.py ./src/
+
+# Create main API file
+COPY <<EOF ./main.py
+"""
+Clinical Trials API application.
+"""
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import generate_latest, Counter, Histogram
+import time
+
+# Import your API modules here
+from src.serving.api import ModelAPI
+
+# Create FastAPI app
+app = FastAPI(
+    title="Clinical Trials MLOps API",
+    description="API for cancer prediction models with A/B testing",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Prometheus metrics
+REQUEST_COUNT = Counter('api_requests_total', 'Total API requests', ['method', 'endpoint'])
+REQUEST_LATENCY = Histogram('api_request_duration_seconds', 'API request latency')
+
+@app.middleware("http")
+async def add_process_time_header(request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    
+    # Record metrics
+    REQUEST_COUNT.labels(method=request.method, endpoint=request.url.path).inc()
+    REQUEST_LATENCY.observe(process_time)
+    
+    response.headers["X-Process-Time"] = str(process_time)
+    return response
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": time.time()}
+
+@app.get("/metrics")
+async def get_metrics():
+    return generate_latest()
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8080,
+        workers=4,
+        log_level="info"
+    )
+EOF
+
+# Change ownership
+RUN chown -R app:app /app
+
+# Switch to app user
+USER app
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Start the application
+CMD ["python", "main.py"]
