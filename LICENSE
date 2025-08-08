@@ -1,0 +1,152 @@
+MIT License
+
+Copyright (c) 2024 MLOps Clinical Trials Platform
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## Third-Party Licenses
+
+This project includes or depends on third-party software components that are 
+subject to separate license terms. Below is a summary of the main dependencies 
+and their licenses:
+
+### Python Dependencies
+
+#### Core Framework Dependencies
+- **FastAPI** - MIT License
+- **Uvicorn** - BSD License
+- **Pydantic** - MIT License
+- **SQLAlchemy** - MIT License
+- **Alembic** - MIT License
+
+#### Machine Learning Libraries
+- **scikit-learn** - BSD 3-Clause License
+- **XGBoost** - Apache License 2.0
+- **PyTorch** - BSD 3-Clause License
+- **LightGBM** - MIT License
+- **NumPy** - BSD 3-Clause License
+- **Pandas** - BSD 3-Clause License
+- **Optuna** - MIT License
+
+#### MLOps and Monitoring
+- **MLflow** - Apache License 2.0
+- **Prometheus Client** - Apache License 2.0
+- **DVC** - Apache License 2.0
+- **Ray** - Apache License 2.0
+- **Dask** - BSD 3-Clause License
+
+#### Data Processing
+- **Apache Arrow** - Apache License 2.0
+- **PyArrow** - Apache License 2.0
+- **Pyjanitor** - MIT License
+- **Great Expectations** - Apache License 2.0
+
+#### Security and Authentication
+- **PyJWT** - MIT License
+- **Passlib** - BSD-derived License
+- **Cryptography** - Apache License 2.0 and BSD License
+
+#### Testing and Development
+- **pytest** - MIT License
+- **pytest-cov** - MIT License
+- **Black** - MIT License
+- **Flake8** - MIT License
+- **MyPy** - MIT License
+- **Pre-commit** - MIT License
+- **Bandit** - Apache License 2.0
+
+### Infrastructure and Deployment
+
+#### Container and Orchestration
+- **Docker** - Apache License 2.0
+- **Kubernetes** - Apache License 2.0
+- **Helm** - Apache License 2.0
+- **Istio** - Apache License 2.0
+
+#### Databases and Storage
+- **PostgreSQL** - PostgreSQL License (similar to MIT)
+- **Redis** - BSD 3-Clause License
+- **MinIO** - GNU Affero General Public License v3.0
+
+#### Monitoring and Observability
+- **Prometheus** - Apache License 2.0
+- **Grafana** - GNU Affero General Public License v3.0
+- **Jaeger** - Apache License 2.0
+
+### JavaScript/TypeScript Dependencies (if applicable)
+
+#### Frontend Libraries (if web UI is added)
+- **React** - MIT License
+- **TypeScript** - Apache License 2.0
+- **Material-UI** - MIT License
+
+### License Compatibility
+
+All dependencies have been chosen to ensure license compatibility with the MIT License:
+
+- **MIT License**: Fully compatible
+- **BSD Licenses**: Fully compatible
+- **Apache License 2.0**: Compatible with MIT
+- **PostgreSQL License**: Compatible with MIT
+
+### AGPL Components
+
+**Note**: Some components like MinIO and Grafana use AGPL licenses. These are:
+- Used as separate services/containers
+- Not directly linked with the main codebase
+- Deployed as independent infrastructure components
+
+### License Obligations
+
+When using this software, you must:
+
+1. **MIT License Obligations**:
+   - Include the copyright notice and license text
+   - No warranty is provided
+
+2. **Apache License 2.0 Components**:
+   - Include attribution notices
+   - State any changes made to Apache-licensed code
+
+3. **BSD License Components**:
+   - Include copyright notices
+   - Include license text
+
+### Full License Texts
+
+Full license texts for all dependencies can be found in their respective 
+documentation or source repositories. Key license texts are available at:
+
+- MIT License: https://opensource.org/licenses/MIT
+- Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+- BSD 3-Clause: https://opensource.org/licenses/BSD-3-Clause
+- PostgreSQL License: https://www.postgresql.org/about/licence/
+
+### Disclaimer
+
+This license summary is provided for convenience only and is not a substitute 
+for the actual license terms. Users should refer to the original license texts 
+for authoritative licensing information.
+
+### Contact
+
+For questions about licensing or to report license compliance issues, please 
+contact: legal@mlops-clinical-trials.com
