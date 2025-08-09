@@ -4,37 +4,37 @@
 
 A comprehensive, production-ready MLOps platform enabling reproducible training pipelines for 50+ cancer research models with automated validation gates, A/B testing capabilities, and enterprise-grade security across multiple cloud providers.
 
-## 🎯 Key Features
+## Key Features
 
 ### **Core MLOps Capabilities**
-- 🔬 **End-to-End ML Pipelines**: Automated training, validation, and deployment for cancer research models
-- 🛡️ **Automated Validation Gates**: Reduces failed deployments by 80% through comprehensive validation
-- 🧪 **Model A/B Testing**: Safe rollout with Istio service mesh and statistical significance testing
-- 🎯 **50+ Cancer Models**: Support for diverse cancer prediction and risk assessment models
-- 📊 **Model Explainability**: SHAP and LIME integration for transparent AI decisions
+-  **End-to-End ML Pipelines**: Automated training, validation, and deployment for cancer research models
+-  **Automated Validation Gates**: Reduces failed deployments by 80% through comprehensive validation
+-  **Model A/B Testing**: Safe rollout with Istio service mesh and statistical significance testing
+-  **50+ Cancer Models**: Support for diverse cancer prediction and risk assessment models
+-  **Model Explainability**: SHAP and LIME integration for transparent AI decisions
 
 ### **Enterprise Security & Compliance**
-- 🔐 **Zero-Trust Architecture**: mTLS everywhere with Istio service mesh
-- 🛡️ **Multi-Layer Security Scanning**: Snyk, SonarQube, Trivy, Semgrep integration
-- 📋 **Automated Compliance**: HIPAA, SOC2, and clinical research compliance
-- 🔑 **Secret Management**: Multi-cloud secret synchronization with encryption at rest
-- 👁️ **Runtime Security**: Falco threat detection with ML-specific rules
+-  **Zero-Trust Architecture**: mTLS everywhere with Istio service mesh
+-  **Multi-Layer Security Scanning**: Snyk, SonarQube, Trivy, Semgrep integration
+-  **Automated Compliance**: HIPAA, SOC2, and clinical research compliance
+-  **Secret Management**: Multi-cloud secret synchronization with encryption at rest
+-  **Runtime Security**: Falco threat detection with ML-specific rules
 
 ### **Multi-Cloud & High Availability**
-- ☁️ **Multi-Cloud Deployment**: Native support for AWS, Azure, and GCP
-- 🚀 **Auto-Scaling to 1000+ Replicas**: KEDA + HPA + Cluster Autoscaler
-- 🌍 **Global Load Balancing**: Cross-region traffic distribution
-- 💾 **Disaster Recovery**: Automated failover with 99.99% availability SLA
-- 📈 **Performance Optimization**: Sub-2s response times even during traffic surges
+-  **Multi-Cloud Deployment**: Native support for AWS, Azure, and GCP
+-  **Auto-Scaling to 1000+ Replicas**: KEDA + HPA + Cluster Autoscaler
+-  **Global Load Balancing**: Cross-region traffic distribution
+-  **Disaster Recovery**: Automated failover with 99.99% availability SLA
+-  **Performance Optimization**: Sub-2s response times even during traffic surges
 
 ### **Advanced Monitoring & Observability**
-- 📊 **Multi-Cloud Monitoring**: Unified dashboards across all cloud providers
-- 🔔 **Intelligent Alerting**: ML-based anomaly detection and proactive alerts
-- 📈 **Real-Time Metrics**: Custom ML metrics, model drift detection, and performance tracking
-- 🔍 **Distributed Tracing**: End-to-end request tracing with Jaeger
-- 📋 **Compliance Reporting**: Automated security and performance reports
+-  **Multi-Cloud Monitoring**: Unified dashboards across all cloud providers
+-  **Intelligent Alerting**: ML-based anomaly detection and proactive alerts
+-  **Real-Time Metrics**: Custom ML metrics, model drift detection, and performance tracking
+-  **Distributed Tracing**: End-to-end request tracing with Jaeger
+-  **Compliance Reporting**: Automated security and performance reports
 
-## 🏗️ Advanced Architecture
+##  Advanced Architecture
 
 ```mermaid
 graph TB
@@ -91,7 +91,7 @@ graph TB
     C1 --> D1
 ```
 
-## 🚀 Quick Start
+##  Quick Start
 
 1. **Setup Environment**
    ```bash
@@ -108,7 +108,7 @@ graph TB
    kubectl apply -f deployments/model-serving/
    ```
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 mlops-clinical-trials/
@@ -123,7 +123,7 @@ mlops-clinical-trials/
 └── docs/               # Documentation
 ```
 
-## �️ Technology Stack
+## Technology Stack
 
 ### **Core ML & Data**
 - **Python 3.9+**: Core development language
@@ -172,7 +172,7 @@ mlops-clinical-trials/
 - **Azure**: AKS, Azure Database, Blob Storage, Azure Monitor
 - **GCP**: GKE, Cloud SQL, Cloud Storage, Cloud Monitoring
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### Prerequisites
 - Docker 20.10+
@@ -252,7 +252,7 @@ kubectl get ingress -n mlops-platform
 # - API: https://api.your-domain.com
 ```
 
-## 🔧 Configuration
+##  Configuration
 
 ### Environment Variables
 
@@ -295,7 +295,7 @@ data:
   gcp-service-account: <base64-encoded>
 ```
 
-## 📊 Usage Examples
+##  Usage Examples
 
 ### Training a Cancer Prediction Model
 
@@ -382,7 +382,7 @@ status = server.health_check()
 print(f"Server status: {status}")
 ```
 
-## 🔍 Monitoring & Observability
+##  Monitoring & Observability
 
 ### Grafana Dashboards
 
@@ -417,7 +417,7 @@ groups:
           summary: "Traffic surge detected - auto-scaling triggered"
 ```
 
-## 🛡️ Security & Compliance
+##  Security & Compliance
 
 ### Zero-Trust Security Model
 
@@ -446,7 +446,7 @@ stages:
   - runtime-monitoring: Falco threat detection
 ```
 
-## ⚡ Auto-Scaling & Performance
+##  Auto-Scaling & Performance
 
 ### Intelligent Auto-Scaling
 
@@ -474,7 +474,7 @@ surge_protection:
 - **Availability**: 99.99% uptime with multi-cloud redundancy
 - **Cost Efficiency**: 40% cost reduction through intelligent scaling
 
-## 🧪 Testing & Quality Assurance
+##  Testing & Quality Assurance
 
 ### Automated Testing Pipeline
 
@@ -498,7 +498,7 @@ surge_protection:
 - **Drift Detection**: Automatic retraining triggers
 - **Shadow Mode**: Safe testing before production deployment
 
-## 📈 Cost Optimization
+##  Cost Optimization
 
 ### Multi-Cloud Cost Management
 
@@ -518,7 +518,7 @@ daily_costs = monitor.get_daily_costs()
 optimization_suggestions = monitor.get_cost_optimization_recommendations()
 ```
 
-## 🔧 Troubleshooting
+##  Troubleshooting
 
 ### Common Issues
 
@@ -561,8 +561,6 @@ curl https://api.your-domain.com/debug/health
 curl https://api.your-domain.com/debug/metrics
 ```
 
-## 🤝 Contributing
-
 ### Development Setup
 
 ```bash
@@ -583,11 +581,11 @@ docker-compose -f docker-compose.dev.yml up
 - **Testing**: 90%+ test coverage required
 - **Documentation**: Comprehensive docstrings and README updates
 
-## 📄 License
+##  License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🆘 Support
+##  Support
 
 - **Documentation**: [docs.your-domain.com](https://docs.your-domain.com)
 - **Issues**: [GitHub Issues](https://github.com/ruslanbaba/mlops-clinical-trials/issues)
@@ -598,7 +596,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Built with ❤️ for advancing cancer research through AI**
 
-## 📊 Supported Cancer Models
+##  Supported Cancer Models
 
 - Breast Cancer Risk Assessment
 - Lung Cancer Screening
@@ -607,7 +605,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Skin Cancer Classification
 - And 45+ more specialized models
 
-## 🛡️ Validation Gates
+##  Validation Gates
 
 1. **Data Quality Validation**
 2. **Model Performance Validation**
@@ -615,7 +613,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 4. **Regulatory Compliance Check**
 5. **Security Scan**
 
-## 🧪 A/B Testing Framework
+##  A/B Testing Framework
 
 The platform includes a sophisticated A/B testing framework for safe model deployment:
 
@@ -624,17 +622,14 @@ The platform includes a sophisticated A/B testing framework for safe model deplo
 - **Automatic Rollback**: Immediate rollback on performance degradation
 - **Statistical Significance**: Built-in statistical testing for model comparison
 
-## 📈 Performance Metrics
+##  Performance Metrics
 
 - **Deployment Success Rate**: 95% (80% improvement)
 - **Model Training Time**: Reduced by 60% through optimized pipelines
 - **Time to Production**: 70% faster model deployment
 - **Model Accuracy**: Consistently >90% across cancer types
 
-## 🤝 Contributing
 
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on contributing to this project.
-
-## 📄 License
+##  License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
