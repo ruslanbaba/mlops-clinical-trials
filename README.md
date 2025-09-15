@@ -574,27 +574,6 @@ pre-commit install
 docker-compose -f docker-compose.dev.yml up
 ```
 
-### Code Standards
-
-- **Python**: PEP 8, Black formatting, type hints required
-- **Security**: Bandit security linting, secret scanning
-- **Testing**: 90%+ test coverage required
-- **Documentation**: Comprehensive docstrings and README updates
-
-##  License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-##  Support
-
-- **Documentation**: [docs.your-domain.com](https://docs.your-domain.com)
-- **Issues**: [GitHub Issues](https://github.com/ruslanbaba/mlops-clinical-trials/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/ruslanbaba/mlops-clinical-trials/discussions)
-- **Enterprise Support**: Contact [support@your-domain.com](mailto:support@your-domain.com)
-
----
-
-**Built with ❤️ for advancing cancer research through AI**
 
 ##  Supported Cancer Models
 
@@ -629,7 +608,3 @@ The platform includes a sophisticated A/B testing framework for safe model deplo
 - **Time to Production**: 70% faster model deployment
 - **Model Accuracy**: Consistently >90% across cancer types
 
-
-##  License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
