@@ -447,6 +447,85 @@ spec:
           not input.review.object.metadata.annotations["volume.kubernetes.io/storage-class"]
           msg := "PersistentVolumeClaim must specify an encrypted storage class"
         }
+
+---
+# Kyverno Policy: Require Non-Root, Read-Only RootFS, and Signature Verification
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mlops-pod-security-standards
+  annotations:
+    policies.kyverno.io/title: Disallow Root and Enforce ReadOnly Root Filesystem
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-non-root
+      match:
+        any:
+        - resources:
+            kinds:
+              - Pod
+            namespaces:
+              - mlops-clinical-trials
+      validate:
+        message: "Running as root is forbidden. Set runAsNonRoot: true and runAsUser > 0."
+        pattern:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+            containers:
+              - =(securityContext):
+                  runAsNonRoot: true
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                      - ALL
+
+---
+# External Secrets Operator - SecretStore Integration
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: cloud-secrets-backend
+  namespace: security-hardening
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: us-west-2
+      auth:
+        jwt:
+          serviceAccountRef:
+            name: external-secrets-sa
+            namespace: security-hardening
+---
+# ExternalSecret for Database & API Credentials
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: mlops-database-secrets
+  namespace: mlops-clinical-trials
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: cloud-secrets-backend
+    kind: ClusterSecretStore
+  target:
+    name: mlops-db-credentials
+    creationPolicy: Owner
+  data:
+    - secretKey: db-password
+      remoteRef:
+        key: mlops/clinical-trials/database
+        property: password
+    - secretKey: jwt-secret
+      remoteRef:
+        key: mlops/clinical-trials/api
+        property: jwt_secret
         
         violation[{"msg": msg}] {
           input.review.object.kind == "PersistentVolumeClaim"

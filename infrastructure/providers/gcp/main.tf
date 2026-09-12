@@ -358,6 +358,88 @@ module "gcp_vertex_ai" {
   depends_on = [google_project_service.required_apis]
 }
 
+# GCP Cloud Armor WAF & Cyberdefence Policy
+resource "google_compute_security_policy" "cloud_armor_waf" {
+  name        = "mlops-cloud-armor-waf-${local.resource_suffix}"
+  description = "Cloud Armor WAF policy for MLOps Clinical Trials"
+
+  default_rule_action = "allow"
+
+  # Rule 1: OWASP SQL Injection Protection
+  rule {
+    action   = "deny(403)"
+    priority = "1000"
+    match {
+      expr {
+        expression = "evaluatePreconfiguredExpr('sqli-v33-stable')"
+      }
+    }
+    description = "Block SQL injection attempts"
+  }
+
+  # Rule 2: OWASP Cross-Site Scripting (XSS) Protection
+  rule {
+    action   = "deny(403)"
+    priority = "1001"
+    match {
+      expr {
+        expression = "evaluatePreconfiguredExpr('xss-v33-stable')"
+      }
+    }
+    description = "Block XSS attacks"
+  }
+
+  # Rule 3: Rate Limiting DDoS Protection
+  rule {
+    action   = "rate_based_ban"
+    priority = "2000"
+    match {
+      versioned_expr = "SRC_IPS_V1"
+      config {
+        src_ip_ranges = ["*"]
+      }
+    }
+    rate_limit_options {
+      conform_action = "allow"
+      exceed_action  = "deny(429)"
+      enforce_on_key = "IP"
+      rate_limit_threshold {
+        count        = 500
+        interval_sec = 60
+      }
+      ban_threshold {
+        count        = 1000
+        interval_sec = 60
+      }
+      ban_duration_sec = 300
+    }
+    description = "Rate limit requests per IP to mitigate traffic surge DDoS attacks"
+  }
+}
+
+# GCP Cloud DNS Zone with DNSSEC
+resource "google_dns_managed_zone" "dnssec_zone" {
+  name        = "mlops-dnssec-zone-${local.resource_suffix}"
+  dns_name    = "clinicaltrials.${var.environment}.gcp.internal."
+  description = "DNSSEC enabled managed zone for clinical trial platform"
+
+  dnssec_config {
+    state = "on"
+    default_key_specs {
+      algorithm  = "rsasha256"
+      key_type   = "keySigning"
+      key_length = 2048
+    }
+    default_key_specs {
+      algorithm  = "rsasha256"
+      key_type   = "zoneSigning"
+      key_length = 1024
+    }
+  }
+
+  depends_on = [google_project_service.required_apis]
+}
+
 # GCP Security (IAM, Secret Manager)
 module "gcp_security" {
   source = "../modules/security/gcp"

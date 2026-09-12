@@ -1,0 +1,35 @@
+# Istio Shadow Deployment / Traffic Mirroring for Candidate Model Validation
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: model-shadow-vs
+  namespace: mlops-clinical-trials
+spec:
+  hosts:
+    - clinical-trials-model-server
+  http:
+    - route:
+        - destination:
+            host: clinical-trials-model-server
+            subset: champion # 100% live traffic to production model
+          weight: 100
+      mirror:
+        host: clinical-trials-model-server
+        subset: candidate # Asynchronously mirror live requests to candidate model
+      mirrorPercentage:
+        value: 100.0 # Mirror 100% of live production inference traffic for shadow evaluation
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: model-shadow-dr
+  namespace: mlops-clinical-trials
+spec:
+  host: clinical-trials-model-server
+  subsets:
+    - name: champion
+      labels:
+        version: champion
+    - name: candidate
+      labels:
+        version: candidate

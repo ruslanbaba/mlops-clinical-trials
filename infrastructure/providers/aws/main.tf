@@ -212,3 +212,143 @@ resource "aws_iam_role_policy_attachment" "aws_load_balancer_controller" {
   policy_arn = "arn:aws:iam::aws:policy/ElasticLoadBalancingFullAccess"
   role       = aws_iam_role.aws_load_balancer_controller.name
 }
+
+# KMS Key for Customer-Managed Encryption
+resource "aws_kms_key" "mlops_kms" {
+  description             = "KMS Key for MLOps Clinical Trials Platform data at rest encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = local.common_tags
+}
+
+resource "aws_kms_alias" "mlops_kms_alias" {
+  name          = "alias/mlops-clinical-trials-${var.environment}"
+  target_key_id = aws_kms_key.mlops_kms.key_id
+}
+
+# Cloud Security & GuardDuty Cyberdefence
+resource "aws_guardduty_detector" "primary" {
+  enable = true
+
+  datasources {
+    s3_logs {
+      enable = true
+    }
+    kubernetes {
+      audit_logs {
+        enable = true
+      }
+    }
+  }
+
+  tags = local.common_tags
+}
+
+# AWS WAFv2 Web ACL for Ingress Cyberdefence
+resource "aws_wafv2_web_acl" "api_waf" {
+  name        = "mlops-api-waf-${local.resource_suffix}"
+  description = "WAF for MLOps Clinical Trials API & Serving Endpoints"
+  scope       = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  # Managed Rule Group: Common Rule Set
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 10
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "CommonRuleSetMetric"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # Managed Rule Group: Known Bad Inputs
+  rule {
+    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    priority = 20
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "KnownBadInputsMetric"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # Rate-Based Rule for DDoS & Brute-Force Prevention
+  rule {
+    name     = "RateLimitApiRequests"
+    priority = 30
+
+    action {
+      block {}
+    }
+
+    statement {
+      rate_based_statement {
+        limit              = 2000
+        aggregate_key_type = "IP"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "RateLimitApiRequestsMetric"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "MlopsApiWafMetric"
+    sampled_requests_enabled   = true
+  }
+
+  tags = local.common_tags
+}
+
+# Route53 Zone & DNSSEC Security Configuration
+resource "aws_route53_zone" "primary" {
+  name = "clinicaltrials.${var.environment}.internal"
+
+  tags = local.common_tags
+}
+
+resource "aws_route53_key_signing_key" "dnssec" {
+  hosted_zone_id             = aws_route53_zone.primary.id
+  key_management_service_arn = aws_kms_key.mlops_kms.arn
+  name                       = "mlops-dnssec-ksk"
+}
+
+resource "aws_route53_hosted_zone_dnssec" "dnssec" {
+  depends_on = [
+    aws_route53_key_signing_key.dnssec
+  ]
+  hosted_zone_id = aws_route53_zone.primary.id
+}

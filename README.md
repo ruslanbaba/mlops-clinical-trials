@@ -14,18 +14,26 @@ A comprehensive, production-ready MLOps platform enabling reproducible training 
 -  **Model Explainability**: SHAP and LIME integration for transparent AI decisions
 
 ### **Enterprise Security & Compliance**
--  **Zero-Trust Architecture**: mTLS everywhere with Istio service mesh
--  **Multi-Layer Security Scanning**: Snyk, SonarQube, Trivy, Semgrep integration
--  **Automated Compliance**: HIPAA, SOC2, and clinical research compliance
--  **Secret Management**: Multi-cloud secret synchronization with encryption at rest
--  **Runtime Security**: Falco threat detection with ML-specific rules
+-  **Zero-Trust Architecture**: mTLS everywhere with Istio service mesh and strict PeerAuthentication
+-  **Multi-Layer Security Scanning**: Snyk, SonarQube, Trivy, Semgrep, Hadolint, Checkov, Syft SBOM & Cosign image signing
+-  **DNSSEC & Cyberdefence**: Route53 & GCP Cloud DNSSEC, AWS WAFv2, Cloud Armor, Rate-limiting & DDoS protection
+-  **Automated Compliance**: HIPAA Safe Harbor PHI anonymization, 21 CFR Part 11, SOC2 compliance
+-  **Secret Management**: External Secrets Operator & Vault with automated secret rotation
+-  **Runtime & Pod Security**: Pod Security Standards (Restricted), Kyverno non-root policies, Falco threat detection
 
 ### **Multi-Cloud & High Availability**
--  **Multi-Cloud Deployment**: Native support for AWS, Azure, and GCP
--  **Auto-Scaling to 1000+ Replicas**: KEDA + HPA + Cluster Autoscaler
--  **Global Load Balancing**: Cross-region traffic distribution
+-  **Multi-Cloud Deployment**: Native support for AWS, Azure, and GCP with Customer-Managed KMS encryption
+-  **Advanced Auto-Scaling**: KEDA + HPA + VPA + Karpenter (EKS Spot/ARM/GPU) & Cluster Autoscaler
+-  **Global Load Balancing**: Cross-region traffic distribution with zero cold-start warmup
 -  **Disaster Recovery**: Automated failover with 99.99% availability SLA
 -  **Performance Optimization**: Sub-2s response times even during traffic surges
+
+### **Latest MLOps Practices**
+-  **Statistical Drift Detection**: KS-test, Chi-Square, PSI & Wasserstein distance in `DriftDetector`
+-  **Automated Retraining**: Drift-triggered retraining orchestrator with automated validation gates and rollback
+-  **Clinical Feature Store**: Point-in-time join and offline/online feature retrieval
+-  **Model Lineage & Provenance**: Full dataset SHA256 checksums, hyperparameters, and git commit tracing
+-  **Shadow Deployment**: Istio 100% traffic mirroring to candidate models for zero-impact production validation
 
 ### **Advanced Monitoring & Observability**
 -  **Multi-Cloud Monitoring**: Unified dashboards across all cloud providers

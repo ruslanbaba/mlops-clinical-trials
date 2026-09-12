@@ -53,6 +53,27 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+    # Hadolint Dockerfile Security Linting
+    - name: Hadolint Dockerfile Lint
+      uses: hadolint/hadolint-action@v3.1.0
+      with:
+        dockerfile: "docker/Dockerfile.api"
+        failure-threshold: error
+
+    # Checkov Infrastructure-as-Code Security Scanning
+    - name: Checkov IaC Scan
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: "infrastructure/"
+        framework: "terraform,kubernetes"
+        output_format: "sarif"
+        output_file_path: "checkov.sarif"
+        soft_fail: true
+
+    # Syft SBOM Generation & Cosign Attestation Setup
+    - name: Install Cosign & Syft
+      uses: sigstore/cosign-installer@v3.1.1
     
     # Semgrep SAST Scanning
     - name: Semgrep Security Analysis

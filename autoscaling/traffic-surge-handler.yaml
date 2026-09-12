@@ -21,8 +21,8 @@ spec:
     name: clinical-trials-api
   pollingInterval: 15  # Check metrics every 15 seconds
   cooldownPeriod: 60   # Wait 60 seconds before scaling down
-  idleReplicaCount: 0  # Scale to 0 when no traffic (cost optimization)
-  minReplicaCount: 2   # Minimum replicas for availability
+  idleReplicaCount: 1  # Maintain minimum warm replica to prevent cold start latency
+  minReplicaCount: 2   # Minimum replicas for high availability
   maxReplicaCount: 100 # Maximum replicas for traffic surge
   
   triggers:
