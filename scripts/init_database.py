@@ -357,6 +357,52 @@ def insert_sample_data():
         raise
 
 
+def init_universal_database():
+    """Initialize universal multi-cloud database tables if configured."""
+    universal_url = getattr(config, "universal_database_url", None)
+    if not universal_url:
+        logger.info("No universal database URL configured. Skipping universal DB initialization.")
+        return
+
+    try:
+        logger.info(f"Connecting to universal multi-cloud database: {universal_url}")
+        conn = psycopg2.connect(universal_url)
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cursor = conn.cursor()
+
+        universal_schema_sql = """
+        CREATE TABLE IF NOT EXISTS patient_records (
+            patient_id VARCHAR(64) PRIMARY KEY,
+            cloud_origin VARCHAR(32) NOT NULL,
+            age INTEGER,
+            gender VARCHAR(16),
+            biomarkers JSONB,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS inference_request_logs (
+            request_id VARCHAR(64) PRIMARY KEY,
+            patient_id VARCHAR(64) NOT NULL,
+            model_name VARCHAR(64) NOT NULL,
+            prediction_score DOUBLE PRECISION,
+            latency_ms DOUBLE PRECISION,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS feature_store_cache (
+            feature_key VARCHAR(128) PRIMARY KEY,
+            feature_values JSONB NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        cursor.execute(universal_schema_sql)
+        logger.info("Universal multi-cloud database initialized successfully!")
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Universal database initialization skipped or non-blocking: {str(e)}")
+
+
 def main():
     """Main function to initialize the database."""
     logger.info("Starting database initialization...")
@@ -370,6 +416,9 @@ def main():
         
         # Insert sample data
         insert_sample_data()
+
+        # Initialize universal database if enabled
+        init_universal_database()
         
         logger.info("Database initialization completed successfully!")
         

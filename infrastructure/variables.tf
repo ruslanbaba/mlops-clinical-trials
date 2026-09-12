@@ -175,6 +175,29 @@ variable "database_config" {
   }
 }
 
+# Universal Multi-Cloud Database Configuration
+variable "enable_universal_database" {
+  description = "Optionally enable universal multi-cloud database (CockroachDB / YugabyteDB) across AWS, Azure, and GCP"
+  type        = bool
+  default     = true
+}
+
+variable "universal_database_config" {
+  description = "Configuration for universal multi-cloud distributed database"
+  type = object({
+    cluster_name      = string
+    nodes_per_cloud   = number
+    storage_per_node  = number
+    enable_encryption = bool
+  })
+  default = {
+    cluster_name      = "mlops-universal-db"
+    nodes_per_cloud   = 3
+    storage_per_node  = 100
+    enable_encryption = true
+  }
+}
+
 # Redis Configuration
 variable "redis_config" {
   description = "Redis configuration"

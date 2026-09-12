@@ -259,6 +259,25 @@ module "gcp_cloudsql" {
   ]
 }
 
+# GCP Cloud Spanner Distributed Database for High-Throughput Request & Traffic Data
+resource "google_spanner_instance" "gcp_spanner" {
+  name         = "spanner-mlops-${local.resource_suffix}"
+  config       = var.enable_multi_region ? "nam-eur-asia1" : "regional-${var.gcp_region}"
+  display_name = "MLOps Clinical Trials Spanner Instance"
+  num_nodes    = var.environment == "prod" ? 3 : 1
+
+  depends_on = [google_project_service.required_apis]
+}
+
+resource "google_spanner_database" "gcp_requests_db" {
+  instance = google_spanner_instance.gcp_spanner.name
+  name     = "mlops_requests"
+  ddl = [
+    "CREATE TABLE patient_requests (patient_id STRING(64) NOT NULL, request_id STRING(64) NOT NULL, timestamp TIMESTAMP NOT NULL, payload STRING(MAX)) PRIMARY KEY (patient_id, request_id)"
+  ]
+  deletion_protection = var.environment == "prod"
+}
+
 # GCP Memorystore (Redis)
 module "gcp_memorystore" {
   source = "../modules/storage/gcp/memorystore"

@@ -128,3 +128,18 @@ locals {
   azure_storage_name = "mlopsazure${replace(local.resource_suffix, "-", "")}"
   gcp_bucket_name   = "mlops-data-gcp-${local.resource_suffix}"
 }
+
+# Universal Multi-Cloud Database Module (Optional cross-cloud distributed database)
+module "universal_database" {
+  source = "./modules/databases/universal"
+
+  environment               = var.environment
+  cluster_name              = var.universal_database_config.cluster_name
+  enable_universal_database = var.enable_universal_database
+  nodes_per_cloud           = var.universal_database_config.nodes_per_cloud
+  storage_gb_per_node       = var.universal_database_config.storage_per_node
+  enable_encryption         = var.universal_database_config.enable_encryption
+  database_name             = "mlops_clinical_trials_universal"
+
+  tags = local.common_tags
+}

@@ -135,6 +135,53 @@ module "azure_postgresql" {
   tags = local.common_tags
 }
 
+# Azure Cosmos DB NoSQL Database for High-Throughput Request & Traffic Data
+resource "azurerm_cosmosdb_account" "azure_cosmos" {
+  name                = "cosmos-mlops-${local.resource_suffix}"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  offer_type          = "Standard"
+  kind                = "GlobalDocumentDB"
+
+  enable_automatic_failover = var.enable_disaster_recovery
+
+  consistency_policy {
+    consistency_level       = "Session"
+    max_interval_in_seconds = 5
+    max_staleness_prefix    = 100
+  }
+
+  geo_location {
+    location          = azurerm_resource_group.main.location
+    failover_priority = 0
+  }
+
+  dynamic "geo_location" {
+    for_each = var.enable_multi_region ? [1] : []
+    content {
+      location          = var.azure_secondary_region
+      failover_priority = 1
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "azurerm_cosmosdb_sql_database" "azure_requests_db" {
+  name                = "mlops_requests"
+  resource_group_name = azurerm_resource_group.main.name
+  account_name        = azurerm_cosmosdb_account.azure_cosmos.name
+}
+
+resource "azurerm_cosmosdb_sql_container" "azure_requests_container" {
+  name                = "requests"
+  resource_group_name = azurerm_resource_group.main.name
+  account_name        = azurerm_cosmosdb_account.azure_cosmos.name
+  database_name       = azurerm_cosmosdb_sql_database.azure_requests_db.name
+  partition_key_path  = "/patient_id"
+  throughput          = 400
+}
+
 # Azure Cache for Redis
 module "azure_redis" {
   source = "../modules/storage/azure/redis"

@@ -46,6 +46,8 @@ class Config(BaseSettings):
     
     # Database settings
     database_url: str = Field(default="postgresql://user:password@localhost:5432/clinical_trials", env="DATABASE_URL")
+    universal_database_url: str = Field(default="postgresql://universal_admin:password@mlops-universal-db.mlops-clinical-trials.svc.cluster.local:26257/mlops_clinical_trials_universal", env="UNIVERSAL_DATABASE_URL")
+    use_universal_database: bool = Field(default=True, env="USE_UNIVERSAL_DATABASE")
     redis_url: str = Field(default="redis://localhost:6379", env="REDIS_URL")
     
     # Storage settings

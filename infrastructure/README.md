@@ -28,7 +28,7 @@ infrastructure/
 
 ### AWS Resources
 - **EKS**: Managed Kubernetes clusters
-- **RDS Aurora**: Multi-region PostgreSQL clusters
+- **RDS Aurora & DynamoDB**: Aurora PostgreSQL + DynamoDB NoSQL for high-throughput request & traffic data
 - **S3**: Object storage with cross-region replication
 - **ElastiCache**: Redis clusters for caching
 - **SageMaker**: ML platform integration
@@ -37,7 +37,7 @@ infrastructure/
 
 ### Azure Resources
 - **AKS**: Azure Kubernetes Service
-- **CosmosDB**: Globally distributed database
+- **PostgreSQL Flexible Server & CosmosDB**: Relational DB + Cosmos DB globally distributed NoSQL for high-throughput traffic
 - **Blob Storage**: Object storage with geo-replication
 - **Redis Cache**: Managed Redis service
 - **Machine Learning**: Azure ML platform
@@ -46,12 +46,18 @@ infrastructure/
 
 ### GCP Resources
 - **GKE**: Google Kubernetes Engine
-- **Cloud SQL**: Managed PostgreSQL service
+- **Cloud SQL & Cloud Spanner**: PostgreSQL + Spanner multi-region distributed database for requests & traffic
 - **Cloud Storage**: Object storage with multi-region
 - **Memorystore**: Managed Redis service
 - **Vertex AI**: ML platform integration
 - **IAM**: Identity and access management
 - **VPC**: Virtual private cloud
+
+### Universal Multi-Cloud Database (Optional)
+- **CockroachDB / YugabyteDB Active-Active Cluster**: Distributed SQL database spanning across AWS EKS, Azure AKS, and GCP GKE
+- **Cross-Cloud Consensus**: Multi-cloud Raft consensus allowing database survival even if an entire cloud provider goes offline
+- **Unified Connection Endpoint**: `mlops-universal-db.mlops-clinical-trials.svc.cluster.local:26257`
+- **High-Throughput Workloads**: Designed for heavy API traffic, patient records, feature store queries, and prediction logs
 
 ## Environment Strategy
 

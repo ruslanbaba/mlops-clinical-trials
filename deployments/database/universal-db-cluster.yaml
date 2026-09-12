@@ -1,0 +1,126 @@
+# Universal Multi-Cloud Distributed Database Cluster (CockroachDB / YugabyteDB)
+# Cross-cloud resilient database serving requests, traffic, patient data, and feature store queries.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlops-universal-db-public
+  namespace: mlops-clinical-trials
+  labels:
+    app: mlops-universal-db
+    tier: database
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 26257
+      targetPort: 26257
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: mlops-universal-db
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlops-universal-db
+  namespace: mlops-clinical-trials
+  labels:
+    app: mlops-universal-db
+  annotations:
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+spec:
+  clusterIP: None
+  ports:
+    - name: grpc
+      port: 26257
+      targetPort: 26257
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: mlops-universal-db
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mlops-universal-db
+  namespace: mlops-clinical-trials
+spec:
+  serviceName: mlops-universal-db
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mlops-universal-db
+  template:
+    metadata:
+      labels:
+        app: mlops-universal-db
+        tier: database
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - mlops-universal-db
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: cockroachdb
+          image: cockroachdb/cockroach:v23.2.3
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+          ports:
+            - containerPort: 26257
+              name: grpc
+            - containerPort: 8080
+              name: http
+          env:
+            - name: COCKROACH_CHANNEL
+              value: kubernetes-helm
+          command:
+            - "/bin/bash"
+            - "-ecx"
+            - |
+              exec /cockroach/cockroach start \
+                --insecure \
+                --advertise-addr=$(hostname -f) \
+                --http-addr=0.0.0.0:8080 \
+                --port=26257 \
+                --join=mlops-universal-db-0.mlops-universal-db,mlops-universal-db-1.mlops-universal-db,mlops-universal-db-2.mlops-universal-db \
+                --cache=25% \
+                --max-sql-memory=25%
+          volumeMounts:
+            - name: datadir
+              mountPath: /cockroach/cockroach-data
+  volumeClaimTemplates:
+    - metadata:
+        name: datadir
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Gi
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mlops-universal-db-pdb
+  namespace: mlops-clinical-trials
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: mlops-universal-db

@@ -91,6 +91,47 @@ module "aws_rds" {
   tags = local.common_tags
 }
 
+# AWS DynamoDB NoSQL Database for High-Throughput Request & Traffic Data
+resource "aws_dynamodb_table" "aws_requests_table" {
+  name           = "mlops-requests-${local.resource_suffix}"
+  billing_mode   = "PAY_PER_REQUEST"
+  hash_key       = "request_id"
+  range_key      = "timestamp"
+
+  attribute {
+    name = "request_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "timestamp"
+    type = "N"
+  }
+
+  attribute {
+    name = "patient_id"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "PatientIndex"
+    hash_key        = "patient_id"
+    range_key       = "timestamp"
+    projection_type = "ALL"
+  }
+
+  point_in_time_recovery {
+    enabled = var.backup_config.enable_point_in_time_recovery
+  }
+
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.mlops_kms.arn
+  }
+
+  tags = local.common_tags
+}
+
 # AWS ElastiCache Redis
 module "aws_elasticache" {
   source = "../modules/storage/aws/elasticache"
